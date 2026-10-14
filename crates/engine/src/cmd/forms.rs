@@ -440,6 +440,7 @@ const PROCEDURE: Field = variants(
                 ),
                 flag("line_search", "Line search").def("false"),
                 json("load_path", "Load path").hint("[[fraction, factor], …]; a ramp when empty"),
+                positive("stabilization", "Stabilization", D::None).hint("damping fraction (e.g. 2e-4) for folding and snap-through; none when empty"),
                 group(
                     "imperfection",
                     "Imperfection",
@@ -753,6 +754,12 @@ pub const PLANAR: &[Field] = &[
     json("holes", "Holes"),
     text("name", "Body name").hint("Plane"),
     int("max_elements", "Max elements", 1, 4_000_000),
+];
+
+pub const REVOLVE: &[Field] = &[
+    num("angle", "Angle (°)", D::None).def("360"),
+    int("sectors", "Sectors", 1, 3600).def("36"),
+    num("start", "Start (°)", D::None).def("0"),
 ];
 
 pub const QUALITY: &[Field] = &[json("elements", "Elements").hint("[labels]; all when empty"), int("bins", "Histogram bins", 1, 1000).def("10")];

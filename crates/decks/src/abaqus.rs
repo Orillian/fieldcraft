@@ -1240,7 +1240,16 @@ impl Deck {
                                 self.out.push('\n');
                             }
                         } else {
-                            self.line("*STATIC");
+                            match n.stabilization {
+                                // Abaqus's automatic stabilization takes the dissipated energy
+                                // fraction, which FieldCraft's damping fraction is.
+                                Some(a) => {
+                                    self.out.push_str("*STATIC, STABILIZE=");
+                                    push_number(&mut self.out, a)?;
+                                    self.out.push('\n');
+                                }
+                                None => self.line("*STATIC"),
+                            }
                             self.numbers_line("", &[n.initial_increment, 1.0, n.min_increment, n.max_increment])?;
                         }
                         if n.line_search {

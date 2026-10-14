@@ -686,14 +686,19 @@ fn a_rubber_bellows_folds_onto_itself() {
             },
         )
         .unwrap();
-    let settings = NonlinearStatic { initial_increment: 0.05, max_increment: 0.1, max_increments: 400, ..NonlinearStatic::default() };
+    let stabilization = std::env::var("STAB").ok().and_then(|v| v.parse().ok());
+    let settings = NonlinearStatic { initial_increment: 0.05, max_increment: 0.1, max_increments: 1000, line_search: stabilization.is_some(), stabilization, ..NonlinearStatic::default() };
     b.model.add_step(Step::new("Step", Procedure::NonlinearStatic(settings)), None).unwrap();
     b.model.add_contact("folds", Contact::new(ContactSurfaces::General { surface: None })).unwrap();
     b.bc("x0", [Some(0.0), None, None], |x| near(x[0], 0.0));
     b.bc("y0", [None, Some(0.0), None], |x| near(x[1], 0.0));
     b.bc("base", [None, None, Some(0.0)], |x| near(x[2], 0.0));
-    b.bc("squeeze", [None, None, Some(-0.8)], move |x| near(x[2], height));
-    let r = solve_nonlinear(&b.model, Some("Step"), &Limits::default()).unwrap();
+    let squeeze: f64 = std::env::var("SQUEEZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.8);
+    b.bc("squeeze", [None, None, Some(-squeeze)], move |x| near(x[2], height));
+    let t0 = std::time::Instant::now();
+    let r = solve_nonlinear(&b.model, Some("Step"), &Limits::default());
+    eprintln!("bellows squeeze {squeeze}: {:?} {}", t0.elapsed(), r.as_ref().err().map(ToString::to_string).unwrap_or_default());
+    let r = r.unwrap();
     report(&r);
     let c = &r.contacts[0];
     eprintln!("closed {} penetration {:.2e} augmentations {}", c.closed(), c.penetration, c.augmentations);
@@ -805,4 +810,12 @@ fn what_2d_contact_refuses() {
     b.model.replace_step(Step { procedure: Procedure::NonlinearStatic(arc), ..b.model.step("Step").unwrap().clone() }).unwrap();
     let e = solve_nonlinear(&b.model, Some("Step"), &Limits::default()).unwrap_err().to_string();
     assert!(e.contains("arc-length"), "{e}");
+}
+
+#[test]
+#[ignore = "scratch"]
+fn scratch_quadratic_2d() {
+    let (_, r2) = planar_c_ring(0.15, 1);
+    report(&r2);
+    quadratic(&r2);
 }

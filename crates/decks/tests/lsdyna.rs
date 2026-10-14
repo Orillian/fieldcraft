@@ -774,6 +774,9 @@ fn nonlinear_static_steps() {
         .collect();
     assert_eq!(curve, [vec![0.0, 0.0], vec![0.5, 1.0], vec![1.0, -1.0]], "{deck}");
 
+    m.replace_step(step("Bend", Procedure::NonlinearStatic(NonlinearStatic { stabilization: Some(2e-4), ..controls.clone() }), &["clamp"], &["tip_load"]))
+        .unwrap();
+    unsupported(&m, "stabilization");
     m.replace_step(step("Bend", Procedure::NonlinearStatic(NonlinearStatic { nonlinear_geometry: false, ..controls }), &["clamp"], &["tip_load"]))
         .unwrap();
     unsupported(&m, "a nonlinear step without nonlinear geometry");

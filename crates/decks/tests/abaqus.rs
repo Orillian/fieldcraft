@@ -776,6 +776,12 @@ fn nonlinear_steps_and_hyperelastic_materials_are_written() {
     assert_eq!(bend.get(at + 1..at + 4), Some(&["0.05, 1.0, 0.0001, 0.5", "*CONTROLS, PARAMETERS=LINE SEARCH", "5,"][..]), "{bend:?}");
     assert!(deck.contains("*ELASTIC, TYPE=ISOTROPIC\n210000.0, 0.3\n"), "St Venant–Kirchhoff is the elastic material");
 
+    // Stabilization: Abaqus's dissipated energy fraction.
+    let stabilized = NonlinearStatic { stabilization: Some(2e-4), ..controls.clone() };
+    m.replace_step(step("Bend", Procedure::NonlinearStatic(stabilized), &["clamp"], &["end"])).unwrap();
+    let deck = abaqus::write(&m).unwrap();
+    assert!(block(&deck, "Bend").contains(&"*STATIC, STABILIZE=0.0002"), "{deck}");
+
     let small = NonlinearStatic { nonlinear_geometry: false, line_search: false, ..controls };
     m.replace_step(step("Bend", Procedure::NonlinearStatic(small), &["clamp"], &["end"])).unwrap();
     m.replace_material("Steel", Material { hyperelastic: Some(Hyperelastic::NeoHookean {}), ..steel() }).unwrap();

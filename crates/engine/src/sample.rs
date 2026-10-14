@@ -15,6 +15,8 @@
 //! geometry is a SolidCraft script run when the sample opens ([`Sample::design`]): a corpus
 //! recipe (`tests/corpus`) or [`UPRIGHT_BRACKET`].
 
+pub mod boot;
+
 use fieldcraft_geometry::Shape;
 use serde_json::{Value, json};
 
@@ -791,5 +793,46 @@ mod tests {
         let last = h["time"].as_array().unwrap().len() - 1;
         let kept = pz(last) / pz(0);
         assert!(kept > 0.4 && kept < 0.6 && kinetic(last) < kinetic(0), "{} {}", pz(last), kinetic(last));
+    }
+
+    #[test]
+    #[ignore = "scratch"]
+    fn boot_axisymmetric_scratch() {
+        let travel: f64 = std::env::var("TRAVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+        let mut s = Session::default();
+        let script = match std::env::var("SECTORS").ok().and_then(|v| v.parse::<usize>().ok()) {
+            Some(n) => super::boot::solid(travel, n, std::env::var("FULL").is_err()),
+            None => super::boot::axisymmetric(travel),
+        };
+        let t0 = std::time::Instant::now();
+        for c in script.as_array().unwrap() {
+            s.execute(c["command"].as_str().unwrap(), &c["params"]).unwrap();
+        }
+        eprintln!("built {} elements in {:?}, height {}", s.model.elements().len(), t0.elapsed(), super::boot::height());
+        if let Ok(path) = std::env::var("DUMP_MODEL") {
+            std::fs::write(path, serde_json::to_string(&s.model).unwrap()).unwrap();
+        }
+        if std::env::var("NO_CONTACT").is_ok() {
+            s.execute("interaction.contact.delete", &json!({"name": "Folds"})).unwrap();
+        }
+        let check = s.execute("model.check", &json!({})).unwrap();
+        eprintln!("{check}");
+        let q = s.execute("mesh.quality", &json!({})).unwrap();
+        eprintln!("quality {}", q.to_string().chars().take(300).collect::<String>());
+        let t0 = std::time::Instant::now();
+        let r = s.execute("solve.nonlinear", &json!({}));
+        eprintln!("solve {:?}: {}", t0.elapsed(), match &r { Ok(v) => v.to_string().chars().take(3000).collect::<String>(), Err(e) => e.to_string() });
+        if r.is_ok() {
+            let labels: Vec<u32> = s.model.nodes().keys().copied().collect();
+            let mut out = Vec::new();
+            for chunk in labels.chunks(5000) {
+                let p = s.execute("solve.probe", &json!({"step": "Squeeze", "nodes": chunk})).unwrap();
+                for (l, n) in chunk.iter().zip(p["nodes"].as_array().unwrap()) {
+                    out.push(json!({"label": l, "xyz": s.model.nodes()[l].xyz, "u": n["displacement"], "p": n["contact"][0]["pressure"]}));
+                }
+            }
+            let elements: Vec<Value> = s.model.elements().iter().map(|(l, e)| json!({"label": l, "nodes": e.nodes})).collect();
+            std::fs::write("/private/tmp/claude-501/fc/boot_state.json", json!({"nodes": out, "elements": elements}).to_string()).unwrap();
+        }
     }
 }

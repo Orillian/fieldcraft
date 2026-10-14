@@ -152,6 +152,11 @@ fn ereach(a: &UpperColumns, k: usize, parent: &[usize], stack: &mut [usize], mar
 }
 
 /// The elimination tree and the entry count of each column of L, without computing values.
+/// The entries of the Cholesky factor of `a`'s pattern (in its own order).
+pub(crate) fn factor_entries(a: &UpperColumns) -> usize {
+    symbolic(a).1.iter().sum()
+}
+
 fn symbolic(a: &UpperColumns) -> (Vec<usize>, Vec<usize>) {
     let parent = etree(a);
     let mut counts = vec![1usize; a.n];

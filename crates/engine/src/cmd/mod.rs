@@ -15,6 +15,7 @@ pub use mesh::analytic_surfaces;
 mod model;
 pub(crate) mod octree;
 mod results;
+mod revolve;
 pub(crate) mod solve;
 mod tags;
 
@@ -40,6 +41,7 @@ pub static ALL: &[CommandSpec] = &[
     mesh::DELAUNAY_POINTS,
     mesh::SURFACE_CHECK,
     mesh::PLANAR,
+    revolve::REVOLVE,
     mesh::TET_GENERATE,
     octree::HEX_OCTREE,
     block::BLOCK,

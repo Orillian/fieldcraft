@@ -217,6 +217,16 @@ pub struct History {
     pub iterations: usize,
     /// Arc-length steps: where the tangent's inertia changes along the path.
     pub critical_points: Vec<CriticalPoint>,
+    /// Steps with stabilization: the energy it dissipated.
+    pub stabilization: Option<Stabilization>,
+}
+
+/// What a step's viscous stabilization did: the energy its damping dissipated, and the work of
+/// the internal forces over the step (the energy the model stores, contact's included).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Stabilization {
+    pub dissipated: f64,
+    pub stored: f64,
 }
 
 impl History {
@@ -228,6 +238,11 @@ impl History {
 
 /// Most displacement values the frames of one step keep (3 per node per frame).
 pub const MAX_FRAME_VALUES: usize = 30_000_000;
+
+
+/// A stabilization that dissipates more than this fraction of the work of the internal forces is
+/// reported.
+const STABILIZATION_WARNING: f64 = 0.05;
 
 /// Line search: accept a step whose residual work is at most this fraction of the first.
 const LINE_SEARCH_ACCEPT: f64 = 0.8;
@@ -425,7 +440,6 @@ impl Problem<'_> {
         committed: &[Vec<f64>],
         contact: &[contact::Committed],
         reference: &[f64],
-        band: f64,
     ) -> Result<Evaluation> {
         let layout = &self.mesh.layout;
         let n = u.len();
@@ -433,10 +447,13 @@ impl Problem<'_> {
         // Contact first: its face pairs extend the tangent's pattern.
         let mut blocks = contact::Blocks::new();
         let mut states = Vec::with_capacity(self.contacts.len());
+        let t0 = std::time::Instant::now();
         for (i, c) in self.contacts.iter().enumerate() {
             let empty = contact::Committed::default();
-            states.push(c.evaluate(self.mesh, u, reference, contact.get(i).unwrap_or(&empty), band, tangent, &mut internal, &mut blocks)?);
+            states.push(c.evaluate(self.mesh, u, reference, contact.get(i).unwrap_or(&empty), tangent, &mut internal, &mut blocks)?);
         }
+        TIMES[0].fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        let t0 = std::time::Instant::now();
         let mut k = tangent.then(|| {
             if blocks.is_empty() {
                 self.pattern.clone()
@@ -451,6 +468,8 @@ impl Problem<'_> {
                 add_block(k, layout, nodes, kinds, &translation_block(data, nodes.len(), kinds))?;
             }
         }
+        TIMES[1].fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+        let t0 = std::time::Instant::now();
         let mut history = Vec::with_capacity(self.mesh.elements.len());
         for round in parallel::blocks(self.mesh.elements.len(), ROUND) {
             let start = round.start;
@@ -473,6 +492,7 @@ impl Problem<'_> {
                 }
             }
         }
+        TIMES[2].fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
         if let Some(s) = &self.springs {
             let mut ku = vec![0.0; s.n];
             s.mul(u.get(..s.n).unwrap_or_default(), &mut ku);
@@ -585,14 +605,19 @@ struct Run<'a> {
     contact: Vec<contact::Committed>,
     /// The displacements of the last converged increment (all degrees of freedom).
     reference: Vec<f64>,
-    /// The band of the engaged contact nodes ([`contact::ENGAGED_BAND`] once an increment's
-    /// active set has chattered, for the rest of the step; else 0).
-    band: f64,
     augmentations: usize,
     /// The augmentation being solved in the current increment.
     augmentation: usize,
     /// The largest force of the converged states (contact's force scale, [`Run::residual`]).
     converged_scale: f64,
+    /// Viscous stabilization: the volume each free equation's node carries, and the damping
+    /// c V per free equation once the first increment has calibrated c; the current
+    /// increment's size as a fraction of the step (the pseudo-time step).
+    volumes: Option<Vec<f64>>,
+    damping: Option<Vec<f64>>,
+    pseudo_time: f64,
+    /// The energy the stabilization has dissipated over the converged increments.
+    dissipated: f64,
 }
 
 /// The outcome of a converged increment.
@@ -624,6 +649,28 @@ impl Run<'_> {
         }
     }
 
+    /// Take the stabilization's damping forces (D/Δt)(q − q₀) out of the free residual `r` at
+    /// `q`, the increment starting from `q0`.
+    fn damp(&self, r: &mut [f64], q: &[f64], q0: &[f64]) {
+        if let Some(d) = &self.damping {
+            let c = 1.0 / self.pseudo_time;
+            for (((ri, di), a), b) in r.iter_mut().zip(d).zip(q).zip(q0) {
+                *ri -= c * di * (a - b);
+            }
+        }
+    }
+
+    /// Add the stabilization's D/Δt to the free tangent.
+    fn damp_tangent(&self, kff: &mut Csr) -> std::result::Result<(), Failure> {
+        if let Some(d) = &self.damping {
+            let c = 1.0 / self.pseudo_time;
+            for (i, di) in d.iter().enumerate() {
+                add_entry(kff, i, i, c * di).map_err(Failure::Fatal)?;
+            }
+        }
+        Ok(())
+    }
+
     fn scale(&self) -> f64 {
         self.force_scale.max(self.force_floor.unwrap_or(0.0)).max(f64::MIN_POSITIVE)
     }
@@ -636,7 +683,6 @@ impl Run<'_> {
             &self.committed,
             &self.contact,
             &self.reference,
-            self.band,
         )?)
     }
 
@@ -647,7 +693,7 @@ impl Run<'_> {
         if let Some(u) = &self.undeformed {
             return Ok(u.clone());
         }
-        let mut e = self.problem.evaluate(&vec![0.0; self.problem.mesh.dofs()], 0.0, true, &self.committed, &[], &[], 0.0)?;
+        let mut e = self.problem.evaluate(&vec![0.0; self.problem.mesh.dofs()], 0.0, true, &self.committed, &[], &[])?;
         let k = e.tangent.take().ok_or_else(|| Failure::Fatal(Error::Internal("tangent".into())))?;
         let [kff] = self.problem.red.reduce([&k])?;
         let u = factor_raw(&kff, self.limits).map(|_| ());
@@ -696,7 +742,7 @@ impl Run<'_> {
     /// factored (the increment then starts from `q0`).
     fn tangent_predictor(&mut self, q0: &[f64], from: f64, to: f64) -> std::result::Result<Option<(Vec<f64>, f64)>, Failure> {
         let red = self.problem.red;
-        let mut e = self.problem.evaluate(&red.expand_scaled(q0, from), to, true, &self.committed, &self.contact, &self.reference, self.band)?;
+        let mut e = self.problem.evaluate(&red.expand_scaled(q0, from), to, true, &self.committed, &self.contact, &self.reference)?;
         let k = e.tangent.take().ok_or_else(|| Failure::Fatal(Error::Internal("tangent".into())))?;
         let rf: Vec<f64> = free_residual(red, &e).iter().zip(prescribed_force(red, &k, to - from)).map(|(a, b)| a - b).collect();
         let mut dq = rf.clone();
@@ -721,6 +767,12 @@ impl Run<'_> {
     ) -> std::result::Result<Converged, Failure> {
         let red = self.problem.red;
         let tol = self.settings.tolerances;
+        // A held active set is the increment's own (`Committed::active`).
+        for c in &mut self.contact {
+            c.active = None;
+        }
+        let mut held = false;
+        let mut updates = 0usize;
         // Start from the extrapolated predictor when it is a valid state, else from q0.
         let start = predictor.map(|p| self.state(p, lambda, true).map(|e| (p.to_vec(), e)));
         let (mut q, mut eval) = match start {
@@ -729,6 +781,7 @@ impl Run<'_> {
             Some(Err(Failure::Cutback(_))) | None => (q0.to_vec(), self.state(q0, lambda, true)?),
         };
         let mut r = self.residual(&eval);
+        self.damp(&mut r, &q, q0);
         // With path-dependent materials, an increment that starts within the force tolerance (a
         // predictor that already solved it) has only round-off left for the energy criterion to
         // measure against: it is waived.
@@ -743,9 +796,18 @@ impl Run<'_> {
         let mut sets = (None, active_sets(&eval));
         let mut flips = 0usize;
         let max_iterations = usize::try_from(self.settings.max_iterations).unwrap_or(usize::MAX);
-        for _ in 0..max_iterations {
+        // Holding an active set starts the increment's iterations again (once).
+        let mut remaining = max_iterations;
+        while remaining > 0 {
+            remaining -= 1;
             // The round-off rule: nothing left to correct.
             if norm_inf(&r) <= ROUND_OFF * tol.force * self.scale() && self.force_floor.is_some() {
+                if self.release(&mut eval, &q, lambda, &mut updates)? {
+                    r = self.residual(&eval);
+                    self.damp(&mut r, &q, q0);
+                    remaining = max_iterations;
+                    continue;
+                }
                 return Ok(Converged { q, evaluation: eval, energy: first_energy });
             }
             if self.iterations >= self.limits.max_newton_iterations {
@@ -756,14 +818,17 @@ impl Run<'_> {
             }
             self.iterations += 1;
             let k = eval.tangent.take().ok_or_else(|| Failure::Fatal(Error::Internal("tangent".into())))?;
-            let [kff] = red.reduce([&k])?;
+            let [mut kff] = red.reduce([&k])?;
             // The first tangent of the step: a singular one is a modelling error, not a cutback.
             let first = self.force_floor.is_none();
             if first {
                 self.seed_force_floor(&kff);
             }
+            self.damp_tangent(&mut kff)?;
             drop(k);
+            let t0 = std::time::Instant::now();
             let factor = self.factor(&kff, first)?;
+            TIMES[3].fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
             self.factor_entries = factor.entries();
             drop(kff);
             let mut dq = r.clone();
@@ -772,24 +837,38 @@ impl Run<'_> {
                 return Err(Failure::Cutback("the Newton correction is not finite".into()));
             }
             let g0 = dot(&dq, &r);
-            let (s, next) = self.line_search(&q, &dq, lambda, g0)?;
+            let (s, next) = self.line_search(&q, q0, &dq, lambda, g0)?;
+            let negative = factor.inertia().negative;
             for (x, d) in q.iter_mut().zip(&dq) {
                 *x += s * d;
             }
             eval = next;
-            if !self.problem.contacts.is_empty() {
+            let holding = self.contact.iter().any(|c| c.active.is_some());
+            if !self.problem.contacts.is_empty() && !holding {
                 let set = active_sets(&eval);
                 if sets.0 == Some(set) && set != sets.1 {
                     flips += 1;
                     if flips >= contact::CHATTER_LIMIT {
-                        // From now on the nodes about to touch stay in the tangent.
-                        self.band = contact::ENGAGED_BAND;
-                        return Err(Failure::Cutback("the contact status alternates between two states (chattering)".into()));
+                        if held {
+                            return Err(Failure::Cutback("the contact status alternates between two states (chattering)".into()));
+                        }
+                        // Hold the current active set until the increment converges (then
+                        // check it, `release`): the nodes touching with no pressure stop
+                        // flipping, and the tangent stays the derivative of the forces.
+                        held = true;
+                        for (c, st) in self.contact.iter_mut().zip(&eval.contact) {
+                            c.active = Some(st.pressure.iter().map(|p| *p > 0.0).collect());
+                        }
+                        eval = self.state(&q, lambda, true)?;
+                        flips = 0;
+                        remaining = max_iterations;
                     }
                 }
-                sets = (Some(sets.1), set);
+                sets = (Some(sets.1), active_sets(&eval));
             }
-            let r_old = std::mem::replace(&mut r, self.residual(&eval));
+            let mut r_new = self.residual(&eval);
+            self.damp(&mut r_new, &q, q0);
+            let r_old = std::mem::replace(&mut r, r_new);
             let energy = (s * dot(&dq, &r_old)).abs();
             let first = *first_energy.get_or_insert(energy);
             let moved = q.iter().zip(q0).fold(0.0f64, |m, (a, b)| m.max((a - b).abs()));
@@ -799,7 +878,7 @@ impl Run<'_> {
                 displacement: s * norm_inf(&dq) / reference,
                 energy: if first > 0.0 { energy / first } else { 0.0 },
                 line_search: s,
-                negative_pivots: factor.inertia().negative,
+                negative_pivots: negative,
                 augmentation: self.augmentation,
             };
             iterations.push(it);
@@ -808,6 +887,13 @@ impl Run<'_> {
             }
             let energy_met = it.energy <= tol.energy || started_converged;
             if (it.force <= tol.force && it.displacement <= tol.displacement && energy_met) || it.force <= ROUND_OFF * tol.force {
+                if self.release(&mut eval, &q, lambda, &mut updates)? {
+                    r = self.residual(&eval);
+                    self.damp(&mut r, &q, q0);
+                    history.clear();
+                    remaining = max_iterations;
+                    continue;
+                }
                 return Ok(Converged { q, evaluation: eval, energy: first_energy });
             }
             history.push(it.force);
@@ -861,7 +947,8 @@ impl Run<'_> {
             self.augmentations += 1;
             self.augmentation = *count;
             for (l, s) in self.contact.iter_mut().zip(&c.evaluation.contact) {
-                l.multipliers.clone_from(&s.pressure);
+                // A held-closed node may have pulled (within the tolerance); multipliers press.
+                l.multipliers = s.pressure.iter().map(|p| p.max(0.0)).collect();
             }
             // From the converged state, measured against the increment's start and its first
             // correction like the increment itself.
@@ -872,7 +959,37 @@ impl Run<'_> {
 
     /// The line search along `dq` from `q`: the accepted step and the state there (with the
     /// tangent).
-    fn line_search(&mut self, q: &[f64], dq: &[f64], lambda: f64, g0: f64) -> std::result::Result<(f64, Evaluation), Failure> {
+    /// At a converged state `eval` (at `q`, load factor `lambda`) with active sets held: when
+    /// every one is consistent there ([`Interface::update_held`]) they are released and the
+    /// state is the solution (false); otherwise the offending nodes switch, at most
+    /// [`contact::MAX_ACTIVE_SET_UPDATES`] times, `eval` is evaluated again and the iterations
+    /// go on (true).
+    fn release(&mut self, eval: &mut Evaluation, q: &[f64], lambda: f64, updates: &mut usize) -> std::result::Result<bool, Failure> {
+        if self.contact.iter().all(|c| c.active.is_none()) {
+            return Ok(false);
+        }
+        let next: Vec<Option<Vec<bool>>> =
+            self.problem.contacts.iter().zip(&self.contact).zip(&eval.contact).map(|((i, c), s)| i.update_held(c, s)).collect();
+        if next.iter().all(Option::is_none) {
+            for c in &mut self.contact {
+                c.active = None;
+            }
+            return Ok(false);
+        }
+        *updates += 1;
+        if *updates > contact::MAX_ACTIVE_SET_UPDATES {
+            return Err(Failure::Cutback("the contact's active set does not settle".into()));
+        }
+        for (c, n) in self.contact.iter_mut().zip(next) {
+            if n.is_some() {
+                c.active = n;
+            }
+        }
+        *eval = self.state(q, lambda, true)?;
+        Ok(true)
+    }
+
+    fn line_search(&mut self, q: &[f64], q0: &[f64], dq: &[f64], lambda: f64, g0: f64) -> std::result::Result<(f64, Evaluation), Failure> {
         let at = |s: f64| -> Vec<f64> { q.iter().zip(dq).map(|(a, b)| a + s * b).collect() };
         // The full step, with its tangent (taken in most iterations).
         let full = self.state(&at(1.0), lambda, true);
@@ -880,11 +997,15 @@ impl Run<'_> {
             return full.map(|e| (1.0, e));
         }
         let red = self.problem.red;
-        let work = |e: &Evaluation| dot(dq, &free_residual(red, e));
+        let work = |e: &Evaluation, s: f64| {
+            let mut r = free_residual(red, e);
+            self.damp(&mut r, &at(s), q0);
+            dot(dq, &r)
+        };
         let mut s = 1.0;
         let mut g = match &full {
             Ok(e) => {
-                let g1 = work(e);
+                let g1 = work(e, 1.0);
                 if g1.abs() <= LINE_SEARCH_ACCEPT * g0.abs() {
                     return full.map(|e| (1.0, e));
                 }
@@ -906,7 +1027,7 @@ impl Run<'_> {
             }
             s = next;
             g = match self.state(&at(s), lambda, false) {
-                Ok(e) => Some(work(&e)),
+                Ok(e) => Some(work(&e, s)),
                 Err(Failure::Cutback(_)) => None,
                 Err(f) => return Err(f),
             };
@@ -928,6 +1049,26 @@ impl Run<'_> {
         self.state(&at(s), lambda, true).map(|e| (s, e))
     }
 }
+
+/// Per free equation, the volume its node carries (the lumped mass of a unit density): the
+/// stabilization's mass matrix.
+fn nodal_volumes(problem: &Problem) -> Result<Vec<f64>> {
+    let mut v = vec![0.0; problem.mesh.dofs()];
+    for (e, dofs) in problem.mesh.elements.iter().zip(&problem.element_dofs) {
+        let lumped = e.kernel()?.lumped_mass(1.0).map_err(|err| Error::element(e.label, err))?;
+        let per = dofs.len() / lumped.len().max(1);
+        for (n, m) in lumped.iter().enumerate() {
+            for d in dofs.iter().skip(n * per).take(per) {
+                if let Some(x) = v.get_mut(*d) {
+                    *x += m;
+                }
+            }
+        }
+    }
+    Ok(problem.red.restrict(&v))
+}
+
+pub static TIMES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 /// Refuse what nonlinear steps cannot take yet, and warn about what they simplify.
 fn check_supported(model: &Model, mesh: &Mesh, step: &Step, settings: &NonlinearStatic, warnings: &mut Vec<String>) -> Result<()> {
@@ -1178,7 +1319,7 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
         .collect::<Result<Vec<_>>>()?;
     // The undeformed state first: an element that is bad before anything moves is an error in
     // the model, not a reason to cut increments back.
-    problem.evaluate(&vec![0.0; mesh.dofs()], 0.0, false, &committed, &[], &[], 0.0)?;
+    problem.evaluate(&vec![0.0; mesh.dofs()], 0.0, false, &committed, &[], &[])?;
     let path_dependent = problem.materials.iter().any(MaterialModel::is_path_dependent);
     let mut run = Run {
         problem: &problem,
@@ -1194,10 +1335,13 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
         undeformed: None,
         contact: problem.contacts.iter().map(Interface::committed).collect(),
         reference: vec![0.0; mesh.dofs()],
-        band: 0.0,
         augmentations: 0,
         augmentation: 0,
         converged_scale: 0.0,
+        volumes: settings.stabilization.map(|_| nodal_volumes(&problem)).transpose()?,
+        damping: None,
+        pseudo_time: 1.0,
+        dissipated: 0.0,
     };
 
     let mut history = History::default();
@@ -1228,6 +1372,9 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
         let mut size = settings.initial_increment;
         let mut fast = 0usize;
         let mut last: Option<Evaluation> = None;
+        // The work of the internal forces over the step (the energy the model stores, with
+        // contact's), the stabilization's measure.
+        let mut stored = 0.0f64;
         // The last converged increment's free motion and the change of the load factor over it.
         let mut previous: Option<(Vec<f64>, f64)> = None;
         let max_increments = usize::try_from(settings.max_increments).unwrap_or(usize::MAX);
@@ -1262,6 +1409,7 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
                 }
             }
             let saved = run.contact.clone();
+            run.pseudo_time = this;
             let mut augmentations = 0;
             run.augmentation = 0;
             let solved = run
@@ -1270,8 +1418,36 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
             if solved.is_err() {
                 run.contact = saved;
             }
+            if std::env::var("FC_TRACE").is_ok() {
+                let f: Vec<String> = iterations.iter().map(|i| format!("{:.0e}{}", i.force, if i.line_search < 1.0 { format!("/s{:.2}", i.line_search) } else { String::new() })).collect();
+                let closed: usize = match &solved { Ok(c) => c.evaluation.contact.iter().map(|s| s.pressure.iter().filter(|p| **p > 0.0).count()).sum(), Err(_) => 0 };
+                eprintln!("TRACE times contact {} pattern {} elements {} factor {} ms", TIMES[0].load(std::sync::atomic::Ordering::Relaxed) / 1000, TIMES[1].load(std::sync::atomic::Ordering::Relaxed) / 1000, TIMES[2].load(std::sync::atomic::Ordering::Relaxed) / 1000, TIMES[3].load(std::sync::atomic::Ordering::Relaxed) / 1000);
+                eprintln!("TRACE damp {:?} dissipated {:.3e} stored {stored:.3e}", run.damping.as_ref().map(|d| d.iter().fold(0.0f64, |m, v| m.max(*v))), run.dissipated);
+                eprintln!("TRACE inc {number} lam {target_lambda:.5} size {:.2e} closed {closed} neg {:?} {} [{}] {}", change.abs(), iterations.last().map(|i| i.negative_pivots), if solved.is_ok() { "ok" } else { "CUT" }, f.join(" "), match &solved { Err(Failure::Cutback(r)) => r.clone(), _ => String::new() });
+            }
             match solved {
                 Ok(c) => {
+                    if let Some(d) = &run.damping {
+                        run.dissipated += c.q.iter().zip(&q).zip(d).map(|((a, b), di)| di * (a - b) * (a - b)).sum::<f64>() / this;
+                    }
+                    // The work of the internal forces over the increment (trapezoidal; zero forces
+                    // at the unloaded start).
+                    let (u0, u1) = (red.expand_scaled(&q, lambda), red.expand_scaled(&c.q, target_lambda));
+                    let zero = vec![0.0; u0.len()];
+                    let before = last.as_ref().map_or(zero.as_slice(), |e| e.internal.as_slice());
+                    let work = 0.5 * before.iter().zip(&c.evaluation.internal).zip(u0.iter().zip(&u1)).map(|((f0, f1), (a, b))| (f0 + f1) * (b - a)).sum::<f64>();
+                    stored += work;
+                    // The stabilization's damping, calibrated on the first increment (solved
+                    // without it): moving on at that increment's rate Δq/Δt, c V would dissipate
+                    // the fraction α of the work the step does at that rate, W₁/Δt² (the work
+                    // grows with the square of the motion), so c = α W₁ / (Δqᵀ V Δq).
+                    if let (Some(alpha), Some(v), None) = (settings.stabilization, &run.volumes, &run.damping) {
+                        let motion: f64 = c.q.iter().zip(&q).zip(v).map(|((a, b), vi)| vi * (a - b) * (a - b)).sum();
+                        if motion > 0.0 && work.abs() > 0.0 {
+                            let factor = alpha * work.abs() / motion;
+                            run.damping = Some(v.iter().map(|vi| factor * vi).collect());
+                        }
+                    }
                     previous = Some((c.q.iter().zip(&q).map(|(a, b)| a - b).collect(), change));
                     // The increment's own Newton iterations size the next one (augmentations
                     // solve the same increment again).
@@ -1327,13 +1503,23 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
                 }
             }
         }
+        if run.damping.is_some() {
+            history.stabilization = Some(Stabilization { dissipated: run.dissipated, stored });
+            if run.dissipated > STABILIZATION_WARNING * stored.abs() {
+                warnings.push(format!(
+                    "the stabilization dissipated {:.3e}, {:.1} % of the work of the internal forces ({stored:.3e}): lower it, or the result is not quasi-static",
+                    run.dissipated,
+                    100.0 * run.dissipated / stored.abs().max(f64::MIN_POSITIVE)
+                ));
+            }
+        }
         (q, lambda, last)
     };
     history.iterations = run.iterations;
     let u = red.expand_scaled(&q, lambda);
     let evaluation = match last {
         Some(e) => e,
-        None => problem.evaluate(&u, lambda, false, &run.committed, &run.contact, &run.reference, 0.0)?,
+        None => problem.evaluate(&u, lambda, false, &run.committed, &run.contact, &run.reference)?,
     };
     if let Some((at, negative)) = history
         .increments

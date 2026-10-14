@@ -290,6 +290,9 @@ fn plan<'a>(model: &'a Model, r: &Resolved) -> Result<Plan<'a>> {
             refused.insert(format!("step `{}`: explicit dynamic steps (this writer writes implicit analyses so far)", step.name));
         }
         if let Procedure::NonlinearStatic(n) = &step.procedure {
+            if n.stabilization.is_some() {
+                refused.insert(format!("step `{}`: stabilization (artificial damping of a static step; not written yet)", step.name));
+            }
             if !n.nonlinear_geometry {
                 refused.insert(format!(
                     "step `{}`: a nonlinear step without nonlinear geometry (LS-DYNA's nonlinear implicit analysis always follows the deformed shape)",

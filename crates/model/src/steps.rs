@@ -155,6 +155,13 @@ pub struct NonlinearStatic {
     /// lengths in proportion. `None`: load control.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arc_length: Option<ArcLength>,
+    /// Viscous stabilization of local instabilities (wrinkling, folding, snap-through of a
+    /// part under displacement control): damping forces α D (u − uₙ)/Δt against each
+    /// increment's motion, with D the diagonal of the step's first tangent and Δt the increment
+    /// as a fraction of the step, so α is about the fraction of the forces the damping takes
+    /// where the motion is smooth. `None`: none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stabilization: Option<f64>,
 }
 
 /// The constraint of an arc-length step.
@@ -242,6 +249,7 @@ impl Default for NonlinearStatic {
             load_path: None,
             imperfection: None,
             arc_length: None,
+            stabilization: None,
         }
     }
 }
@@ -272,6 +280,14 @@ impl NonlinearStatic {
                 return Err(Error::Invalid(format!("an imperfection takes mode 1 to {MAX_MODES}, got {}", imp.mode)));
             }
             finite("imperfection scale", imp.scale)?;
+        }
+        if let Some(a) = self.stabilization {
+            if !(a > 0.0 && a <= MAX_STABILIZATION) {
+                return Err(Error::Invalid(format!("the stabilization is a damping fraction in (0, {MAX_STABILIZATION}], got {a}")));
+            }
+            if self.arc_length.is_some() {
+                return Err(Error::Invalid("an arc-length step follows instabilities along its path; it takes no stabilization".into()));
+            }
         }
         let initial = fraction("initial increment", self.initial_increment)?;
         let min = fraction("minimum increment", self.min_increment)?;
@@ -330,6 +346,9 @@ impl NonlinearStatic {
         self.load_path.as_ref().and_then(|path| path.iter().map(|p| p[0]).find(|f| *f > t * (1.0 + 1e-12) + 1e-12)).unwrap_or(1.0)
     }
 }
+
+/// The largest damping fraction of a nonlinear step's stabilization.
+pub const MAX_STABILIZATION: f64 = 1.0;
 
 /// Most time increments of a transient heat transfer step.
 pub const MAX_HEAT_INCREMENTS: f64 = 100_000.0;

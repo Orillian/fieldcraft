@@ -527,7 +527,9 @@ impl Symmetric {
             Kind::Definite => Factor::new(a, max_entries).map(Symmetric::Cholesky),
             Kind::Indefinite => LdltFactor::new(a, max_entries).map(Symmetric::Indefinite),
             Kind::Auto => {
+                let t0 = std::time::Instant::now();
                 let symbolic = Symbolic::new(a, max_entries)?;
+                if std::env::var("FC_TRACE").is_ok() { eprintln!("TRACE symbolic {:?}", t0.elapsed()); }
                 match Factor::from_symbolic(&symbolic) {
                     Ok(f) => Ok(Symmetric::Cholesky(f)),
                     Err(FactorError::NotPositiveDefinite { .. }) => LdltFactor::from_symbolic(&symbolic).map(Symmetric::Indefinite),

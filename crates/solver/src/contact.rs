@@ -119,19 +119,14 @@ pub const PENALTY_FACTOR: f64 = 10.0;
 /// the element under it (and no open node keeps a multiplier).
 pub const GAP_TOLERANCE: f64 = 1e-5;
 
-/// Once an increment's active set has chattered, a node open by less than this fraction of its
-/// element's thickness keeps its penalty in the tangent for the rest of the step (its
-/// pressure, and so the residual, is still zero): a node that touches with no pressure, the edge
-/// of a contact that lifts, otherwise flips between open and closed from one Newton iteration to
-/// the next, each state's correction pushing it into the other, and a smaller increment does not
-/// help under proportional loading.
-pub const ENGAGED_BAND: f64 = 1e-3;
+/// Most updates of a held active set in one increment.
+pub const MAX_ACTIVE_SET_UPDATES: usize = 8;
 
 /// Most augmentations of one increment.
 pub const MAX_AUGMENTATIONS: usize = 25;
 
-/// An increment is cut back when the active set alternates between two states this many times
-/// (and the step takes [`ENGAGED_BAND`] from then on).
+/// An increment whose active set alternates between two states this many times holds it fixed
+/// ([`Committed::active`]); if it still alternates once released, the increment is cut back.
 pub const CHATTER_LIMIT: usize = 3;
 
 /// Most faces over the contacts of a model.
@@ -187,6 +182,10 @@ pub struct Committed {
     pub multipliers: Vec<f64>,
     pub traction: Vec<Vec3>,
     pub slipping: Vec<bool>,
+    /// An active set held fixed while an increment that chattered converges: per secondary
+    /// node, closed (its pressure λ − ε ĝ, tension allowed) or open (none). `None`: each
+    /// evaluation decides, p = ⟨λ − ε ĝ⟩.
+    pub active: Option<Vec<bool>>,
 }
 
 impl Committed {
@@ -793,13 +792,13 @@ impl Interface {
             multipliers: vec![0.0; n],
             traction: if friction { vec![[0.0; 3]; n] } else { Vec::new() },
             slipping: vec![false; if friction { n } else { 0 }],
+            active: None,
         }
     }
 
     /// The contact's forces at displacements `u` (added to `internal`), its tangent blocks when
-    /// `tangent`, and its state, from the last converged increment's state `committed` and
-    /// displacements `reference`; nodes open by less than `band` of their element's thickness
-    /// keep their penalty in the tangent ([`ENGAGED_BAND`]; 0: only closed nodes).
+    /// `tangent`, and its state, from the last converged increment's state `committed` (with
+    /// its active set when one is held fixed) and displacements `reference`.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &self,
@@ -807,7 +806,6 @@ impl Interface {
         u: &[f64],
         reference: &[f64],
         committed: &Committed,
-        band: f64,
         tangent: bool,
         internal: &mut [f64],
         blocks: &mut Blocks,
@@ -837,17 +835,21 @@ impl Interface {
         for v in &mut state.normal {
             *v = unit(*v).unwrap_or(*v);
         }
-        // Nodes closed, or open by less than `band` of their element's thickness: their penalty
-        // stays in the tangent.
+        // The closed nodes (their penalty in the tangent): those pressing, or those an active
+        // set held fixed closes.
         let mut engaged = vec![false; n];
         for i in 0..self.nodes.len() {
             let (Some(Some(g)), Some(a), Some(e)) = (weighted.get(i), self.area.get(i), self.penalty.get(i)) else { continue };
             let gap = g / a;
-            let lambda = multipliers.get(i).copied().unwrap_or(0.0);
-            if let (Some(slot), Some(p), Some(h)) = (state.gap.get_mut(i), state.pressure.get_mut(i), self.thickness.get(i)) {
+            let trial = multipliers.get(i).copied().unwrap_or(0.0) - e * gap;
+            let closed = match committed.active.as_ref().and_then(|s| s.get(i)) {
+                Some(held) => *held,
+                None => trial > 0.0,
+            };
+            if let (Some(slot), Some(p)) = (state.gap.get_mut(i), state.pressure.get_mut(i)) {
                 *slot = Some(gap);
-                *p = (lambda - e * gap).max(0.0);
-                engaged[i] = lambda - e * gap > -e * band * h;
+                *p = if closed { trial } else { 0.0 };
+                engaged[i] = closed;
             }
         }
         // The pairs with a closed secondary corner, linearised.
@@ -1172,6 +1174,29 @@ impl Interface {
         }
     }
 
+    /// The active set held at `committed`, checked at `state` (computed with it): `None` when it
+    /// is consistent there (no held-closed node pulls with more than ε_A times
+    /// [`GAP_TOLERANCE`] of its element's thickness, and no held-open node presses by more: a
+    /// node within that band touches with no pressure, and either status is the solution to the
+    /// tolerance), else the set with the offending nodes switched (the primal–dual active set
+    /// update; S. Hüeber, B. I. Wohlmuth, *A primal–dual active set strategy for non-linear
+    /// multibody contact problems*, CMAME 194:3147–3166, 2005).
+    pub fn update_held(&self, committed: &Committed, state: &State) -> Option<Vec<bool>> {
+        let held = committed.active.as_ref()?;
+        let mut next = held.clone();
+        let mut changed = false;
+        for (i, closed) in next.iter_mut().enumerate() {
+            let (Some(Some(gap)), Some(e), Some(h)) = (state.gap.get(i), self.penalty.get(i), self.thickness.get(i)) else { continue };
+            let trial = committed.multipliers.get(i).copied().unwrap_or(0.0) - e * gap;
+            let limit = e * GAP_TOLERANCE * h;
+            if (*closed && trial < -limit) || (!*closed && trial > limit) {
+                *closed = !*closed;
+                changed = true;
+            }
+        }
+        changed.then_some(next)
+    }
+
     /// How far the augmentation is from converged at `state`, computed with `multipliers`: the
     /// largest gap of a closed node, or the gap equivalent λ_A / ε_A of the multiplier an open
     /// node keeps, over the thickness of the element under the node.
@@ -1184,5 +1209,96 @@ impl Interface {
             worst = worst.max(gap / h);
         }
         worst
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fieldcraft_model::{Elastic, Material, Section, SectionKind, Set};
+
+    /// Two separate quads facing each other, the upper one tilted and pressed into the lower
+    /// one, with general contact; `axisymmetric` off the axis.
+    fn pressed_quads(axisymmetric: bool) -> Model {
+        let mut m = Model::default();
+        let x0 = if axisymmetric { 2.0 } else { 0.0 };
+        let lower = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let upper = [[0.25, 1.03], [1.2, 1.01], [1.25, 1.9], [0.3, 1.95]];
+        for (i, p) in lower.iter().chain(&upper).enumerate() {
+            m.set_node(i as u32 + 1, [x0 + p[0], p[1], 0.0]).unwrap();
+        }
+        m.set_element(1, ElementKind::Quad4, vec![1, 2, 3, 4]).unwrap();
+        m.set_element(2, ElementKind::Quad4, vec![5, 6, 7, 8]).unwrap();
+        m.add_set("all", Set { elements: vec![1, 2], ..Set::default() }).unwrap();
+        m.add_material("Mat", Material { elastic: Some(Elastic::Isotropic { young: 10.0, poisson: 0.3 }), ..Material::default() }).unwrap();
+        let kind = if axisymmetric { SectionKind::Axisymmetric {} } else { SectionKind::PlaneStrain { thickness: 1.5 } };
+        m.add_section("s", Section { set: "all".into(), material: "Mat".into(), kind, formulation: Default::default() }).unwrap();
+        m.add_contact("c", Contact::new(ContactSurfaces::General { surface: None })).unwrap();
+        let step = fieldcraft_model::Step::new("Step", fieldcraft_model::Procedure::NonlinearStatic(Default::default()));
+        m.add_step(step, None).unwrap();
+        m
+    }
+
+    /// The contact's tangent blocks are the derivatives of its forces (central differences), in
+    /// plane strain and axisymmetric models.
+    #[test]
+    fn the_2d_contact_tangent_is_the_derivative_of_its_forces() {
+        for axisymmetric in [false, true] {
+            let m = pressed_quads(axisymmetric);
+            let resolved = m.resolve().unwrap();
+            let mesh = Mesh::new(&m, &resolved, 1_000_000).unwrap();
+            let interfaces = Interface::all(&m, &resolved, &mesh, true, &mut Vec::new()).unwrap();
+            let n = mesh.dofs();
+            // A small motion of every node, so no pair is symmetric by accident, and the upper
+            // quad pressed into the lower one.
+            let mut u: Vec<f64> = (0..n).map(|i| 0.01 * ((i * 7 % 5) as f64 - 2.0)).collect();
+            for node in 4..8 {
+                if let Some(d) = translations(&mesh, node).ok().and_then(|d| d.get(1).copied()) {
+                    u[d] -= 0.06;
+                }
+            }
+            let forces = |u: &[f64], blocks: &mut Blocks| {
+                let mut f = vec![0.0; n];
+                for c in &interfaces {
+                    let committed = c.committed();
+                    c.evaluate(&mesh, u, &vec![0.0; n], &committed, true, &mut f, blocks).unwrap();
+                }
+                f
+            };
+            let mut blocks = Blocks::new();
+            forces(&u, &mut blocks);
+            // The dense tangent over (node, x/y) from the 3-per-node blocks.
+            let dof = |node: usize, k: usize| translations(&mesh, node).ok().and_then(|d| d.get(k).copied());
+            let mut k = vec![0.0; n * n];
+            for (nodes, data) in &blocks {
+                let w = 3 * nodes.len();
+                for (a, na) in nodes.iter().enumerate() {
+                    for (b, nb) in nodes.iter().enumerate() {
+                        for r in 0..2 {
+                            for c in 0..2 {
+                                if let (Some(i), Some(j)) = (dof(*na, r), dof(*nb, c)) {
+                                    k[i * n + j] += data[(3 * a + r) * w + 3 * b + c];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let scale = k.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+            assert!(scale > 0.0, "the quads are in contact");
+            let h = 1e-7;
+            for j in 0..n {
+                let shifted = |s: f64| {
+                    let mut v = u.clone();
+                    v[j] += s;
+                    forces(&v, &mut Blocks::new())
+                };
+                let (p, q) = (shifted(h), shifted(-h));
+                for i in 0..n {
+                    let fd = (p[i] - q[i]) / (2.0 * h);
+                    assert!((fd - k[i * n + j]).abs() < 1e-5 * scale, "axisymmetric {axisymmetric}: ({i}, {j}) {fd} vs {}", k[i * n + j]);
+                }
+            }
+        }
     }
 }
