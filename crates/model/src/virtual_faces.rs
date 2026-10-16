@@ -33,6 +33,59 @@ pub struct FaceMerge {
     pub into: Option<String>,
 }
 
+/// Most face splits a model holds.
+pub const MAX_FACE_SPLITS: usize = 1024;
+
+/// A face of a body split along a datum plane for meshing (`split:<name>:a|b`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FaceSplit {
+    pub name: String,
+    pub body: String,
+    pub face: String,
+    /// The datum plane it splits along.
+    pub datum: String,
+}
+
+impl Model {
+    /// The face splits, in the order they apply (after the merges).
+    pub fn face_splits(&self) -> &[FaceSplit] {
+        &self.face_splits
+    }
+
+    /// Add a face split after the others.
+    pub fn add_face_split(&mut self, split: FaceSplit) -> Result<()> {
+        let name = split.name.clone();
+        check_name("face split", &name)?;
+        if self.face_splits.iter().any(|s| s.name == name) {
+            return Err(Error::Invalid(format!("face split `{name}` already exists")));
+        }
+        if self.face_splits.len() >= MAX_FACE_SPLITS {
+            return Err(Error::Limit(format!("a model holds at most {MAX_FACE_SPLITS} face splits")));
+        }
+        let invalid = |m: String| context("face split", &name, Error::Invalid(m));
+        for n in [&split.body, &split.face] {
+            if n.trim().is_empty() || n.len() > MAX_GEOMETRY_NAME_LEN {
+                return Err(invalid(format!("body and face names are 1 to {MAX_GEOMETRY_NAME_LEN} bytes")));
+            }
+        }
+        match self.datum(&split.datum) {
+            None => return Err(context("face split", &name, Error::NotFound(format!("datum `{}`", split.datum)))),
+            Some(d) if d.plane().is_none() => {
+                return Err(invalid(format!("datum `{}` is a datum {}; a split is along a plane", split.datum, d.kind())));
+            }
+            Some(_) => {}
+        }
+        self.face_splits.push(split);
+        Ok(())
+    }
+
+    pub fn remove_face_split(&mut self, name: &str) -> Result<FaceSplit> {
+        let i = self.face_splits.iter().position(|s| s.name == name).ok_or_else(|| Error::NotFound(format!("face split `{name}`")))?;
+        Ok(self.face_splits.remove(i))
+    }
+}
+
 /// Most stitches a model holds.
 pub const MAX_STITCHES: usize = 1024;
 
@@ -130,6 +183,23 @@ mod tests {
 
     fn merge(name: &str, faces: &[&str]) -> FaceMerge {
         FaceMerge { name: name.into(), body: "Base".into(), faces: faces.iter().map(|f| f.to_string()).collect(), into: None }
+    }
+
+    #[test]
+    fn splits_need_a_datum_plane_and_hold_it() {
+        let mut m = Model::default();
+        m.add_datum("Mid", crate::Datum::Plane { point: [0.0; 3], normal: [1.0, 0.0, 0.0] }).unwrap();
+        m.add_datum("P", crate::Datum::Point { point: [0.0; 3] }).unwrap();
+        let sp = |n: &str, d: &str| FaceSplit { name: n.into(), body: "Base".into(), face: "F1:+z".into(), datum: d.into() };
+        m.add_face_split(sp("S", "Mid")).unwrap();
+        for bad in [sp("S", "Mid"), sp("T", "P"), sp("U", "nope"), FaceSplit { face: String::new(), ..sp("V", "Mid") }] {
+            assert!(m.add_face_split(bad).is_err());
+        }
+        assert!(m.remove_datum("Mid").is_err(), "in use by the split");
+        let back: Model = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.face_splits(), m.face_splits());
+        m.remove_face_split("S").unwrap();
+        m.remove_datum("Mid").unwrap();
     }
 
     #[test]

@@ -174,7 +174,8 @@ impl Model {
     /// The definitions that refer to a datum (the partitions that cut by it), as `kind \`name\``
     /// strings.
     pub fn datum_users(&self, name: &str) -> Vec<String> {
-        self.partitions.iter().filter(|p| p.datum == name).map(|p| format!("partition `{}`", p.name)).collect()
+        let partitions = self.partitions.iter().filter(|p| p.datum == name).map(|p| format!("partition `{}`", p.name));
+        partitions.chain(self.face_splits().iter().filter(|s| s.datum == name).map(|s| format!("face split `{}`", s.name))).collect()
     }
 
     /// The partitions, in the order they cut.
