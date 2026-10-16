@@ -50,7 +50,7 @@ pub fn merged_face_name(name: &str) -> String {
 /// Whether a feature error comes from the model's partitions or merges (applied again from the
 /// design as opened) rather than from the design's own timeline.
 pub(crate) fn derived(feature: &str) -> bool {
-    feature.starts_with("partition ") || feature.starts_with("merge ")
+    feature.starts_with("partition ") || feature.starts_with("merge ") || feature.starts_with("split ")
 }
 
 impl Design {
@@ -119,6 +119,9 @@ impl Shape {
         if faces.len() > MAX_MERGE_FACES {
             return Err(Error::Invalid(format!("a merge takes at most {MAX_MERGE_FACES} faces")));
         }
+        if !self.cuts.is_empty() {
+            return Err(Error::Invalid("merges come before splits: a merge cannot take a split face".into()));
+        }
         let mut members = BTreeSet::new();
         for f in faces {
             let found = self.faces_named(f);
@@ -162,7 +165,7 @@ impl Shape {
         }
         let brep = if self.face_map.is_empty() { (0..u32::try_from(self.faces.len()).unwrap_or(0)).collect() } else { self.face_map.clone() };
         let face_map = brep.iter().map(|&v| renumber.get(v as usize).copied().unwrap_or(v)).collect();
-        Ok(Shape { name: self.name.clone(), body: self.body.clone(), faces: kept, face_map })
+        Ok(Shape { name: self.name.clone(), body: self.body.clone(), faces: kept, face_map, cuts: Vec::new() })
     }
 
     /// The neighbour face `face` shares the longest edges with (by name): where a tiny or sliver
@@ -214,6 +217,8 @@ impl Shape {
     /// for a free-form one.
     pub fn member_surfaces(&self, face: u32) -> Result<Vec<Option<FaceSurface>>> {
         let brep = self.brep_face_surfaces()?;
+        // The b side of a split is made of the face it was split from.
+        let face = self.cuts.iter().rev().fold(face, |f, c| if c.faces().1 == f { c.faces().0 } else { f });
         if self.face_map.is_empty() {
             return Ok(brep.get(face as usize).copied().into_iter().collect());
         }
@@ -223,6 +228,21 @@ impl Shape {
     /// `brep` (surfaces by B-rep face) by face: a merged face has its B-rep faces' surface when
     /// they share one, else none.
     pub(crate) fn virtual_surfaces(&self, brep: Vec<Option<FaceSurface>>) -> Result<Vec<Option<FaceSurface>>> {
+        let mut out = self.merged_surfaces(brep)?;
+        for c in &self.cuts {
+            let (a, b) = c.faces();
+            let s = out.get(a as usize).copied().flatten();
+            if out.len() <= b as usize {
+                out.resize(b as usize + 1, None);
+            }
+            if let Some(slot) = out.get_mut(b as usize) {
+                *slot = s;
+            }
+        }
+        Ok(out)
+    }
+
+    fn merged_surfaces(&self, brep: Vec<Option<FaceSurface>>) -> Result<Vec<Option<FaceSurface>>> {
         if self.face_map.is_empty() {
             return Ok(brep);
         }
@@ -243,7 +263,13 @@ impl Shape {
 
     /// `mesh` (a tessellation of the B-rep) with the merged faces: triangles tagged by face,
     /// the edges inside a merged face dropped and the pieces of an edge it leaves joined.
-    pub(crate) fn virtual_mesh(&self, mut mesh: SurfaceMesh) -> SurfaceMesh {
+    pub(crate) fn virtual_mesh(&self, mesh: SurfaceMesh) -> SurfaceMesh {
+        let mut mesh = self.merged_mesh(mesh);
+        crate::face_split::apply(&mut mesh, &self.cuts);
+        mesh
+    }
+
+    fn merged_mesh(&self, mut mesh: SurfaceMesh) -> SurfaceMesh {
         if self.face_map.is_empty() {
             return mesh;
         }

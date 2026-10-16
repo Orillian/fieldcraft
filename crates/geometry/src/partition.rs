@@ -277,7 +277,7 @@ fn split(body: &Shape, plane: &Plane, n: [f64; 3], cut: &Cut) -> Result<Split> {
     let parent = Faces::of(body, tol)?;
     let mut cells: Vec<(bool, [f64; 3], Shape)> = Vec::with_capacity(parts.len());
     for part in parts {
-        let mut shape = Shape { name: String::new(), body: part, faces: Vec::new(), face_map: Vec::new() };
+        let mut shape = Shape { name: String::new(), body: part, faces: Vec::new(), face_map: Vec::new(), cuts: Vec::new() };
         let m = shape.measure()?;
         let negative = dot(sub(m.centroid, cut.point), n) < 0.0;
         shape.faces = (0..m.faces).map(|_| Face { name: String::new(), exact: false, members: Vec::new() }).collect();

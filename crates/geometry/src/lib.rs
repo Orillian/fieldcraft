@@ -20,6 +20,7 @@
 pub mod check;
 mod design;
 mod edges;
+pub mod face_split;
 pub mod features;
 pub mod partition;
 pub mod sample;
@@ -70,6 +71,8 @@ pub struct Shape {
     faces: Vec<Face>,
     /// The virtual face (index into `faces`) of each B-rep face; empty: they are the same.
     face_map: Vec<u32>,
+    /// Faces split along a plane ([`face_split`]), applied after the merges, in order.
+    cuts: Vec<face_split::Cut>,
 }
 
 /// A B-rep face's persistent identity.
@@ -156,7 +159,7 @@ fn xyz(v: solidcraft_geom::Vec3) -> [f64; 3] {
 pub fn block(a: [f64; 3], b: [f64; 3]) -> Result<Shape> {
     let v = |p: [f64; 3]| solidcraft_geom::Vec3 { x: p[0], y: p[1], z: p[2] };
     let body = guard("block", || solidcraft_kernel::box_solid(v(a), v(b)))?;
-    Ok(Shape { name: "Block".into(), body, faces: Vec::new(), face_map: Vec::new() })
+    Ok(Shape { name: "Block".into(), body, faces: Vec::new(), face_map: Vec::new(), cuts: Vec::new() })
 }
 
 impl Shape {
@@ -246,7 +249,7 @@ impl Shape {
             centroid: xyz(m.centroid),
             bbox_min: xyz(m.bbox.min),
             bbox_max: xyz(m.bbox.max),
-            faces: if self.face_map.is_empty() { m.faces } else { self.faces.len() },
+            faces: if self.face_map.is_empty() && self.cuts.is_empty() { m.faces } else { self.faces.len() },
         })
     }
 

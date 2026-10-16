@@ -129,7 +129,7 @@ pub(crate) fn rebuild(doc: &Document) -> Result<Design> {
                 .map(|(i, name)| Face { name: name.clone(), exact: naming::face_name_exact(b, i), members: Vec::new() })
                 .collect())
         })?;
-        bodies.push(Shape { name: b.name.clone(), body: b.body.clone(), faces, face_map: Vec::new() });
+        bodies.push(Shape { name: b.name.clone(), body: b.body.clone(), faces, face_map: Vec::new(), cuts: Vec::new() });
     }
     // A feature that failed leaves a different solid than SolidCraft's: each one names the bodies
     // it would have changed, so opening never hands back a silently different solid.
