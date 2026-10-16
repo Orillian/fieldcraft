@@ -398,7 +398,8 @@ Delaunay methods with Voronoi/ODT improvement, then (2) all-hex and hex-dominant
 - **Implemented** in `fieldcraft-mesh::tet::{ops, improve}` from the two papers: Klincsek's dynamic programming for edge
   removal (interior edges; boundary edges of one flat B-rep face end in a 2-2 flip), multi-face removal grown greedily
   over the sandwiched faces, nonsmooth optimization smoothing (active set, smallest vector of the convex hull of the
-  active gradients, line search; gradients by central differences), and the composite vertex insertion with rollback
+  active gradients, line search; analytic gradients of the active measure, as §3.1 and Freitag–Ollivier-Gooch 1997
+  use), and the composite vertex insertion with rollback
   (barycentres of boundary faces, of the tetrahedron, midpoints of boundary edges, and a point inside off a flat
   boundary edge). Deviations: the inserted vertex takes the Delaunay cavity rather than the optimal cut of §3.4; each pass
   smooths and flips the tetrahedra below sin 40° and inserts only when the worst did not improve; passes and the
@@ -407,7 +408,11 @@ Delaunay methods with Voronoi/ODT improvement, then (2) all-hex and hex-dominant
   angle fine, one corner nearly flat; Shewchuk 2002); the scaled Jacobian analysts check (Knupp 2001, B6.6) catches
   them, and with the weight it decides only near that limit. Every operation is a checked replacement of a region
   (positive by exact `orient3d`, faces matched with opposite orientation, removed vertices fully inside), so the mesh is
-  valid after each step.
+  valid after each step. Speed (#84): an operation (topological, per tetrahedron, edge and face; or a smoothing) that
+  failed is not tried again until a tetrahedron it reads changes (a change clock per vertex; exact, because the
+  operations are functions of that region and the quality is computed on the corners in a canonical order), live
+  tetrahedra's qualities are cached, Klincsek's table starts at the quality to beat, and the composite insertion runs
+  its flips and neighbour smoothing only where a tetrahedron is below the threshold.
 
 **A3.7 Cheng, Dey, Edelsbrunner, Facello, Teng 2000, Sliver exudation.** **Verdict: reference.**
 - **Citation.** J. ACM 47(5):883–904, 2000. DOI [10.1145/355483.355487](https://doi.org/10.1145/355483.355487).

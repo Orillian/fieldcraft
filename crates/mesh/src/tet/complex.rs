@@ -170,7 +170,9 @@ pub enum Step {
 pub struct Raw {
     slots: Vec<(u32, [u32; 4], [u32; 4], [u32; 4])>,
     tets_len: usize,
-    free: Vec<u32>,
+    /// The free list's length, and its last entries (those the change may take).
+    free_len: usize,
+    free_tail: Vec<u32>,
     vtets: Vec<(u32, Vec<u32>)>,
     live: usize,
 }
@@ -199,6 +201,21 @@ pub struct TetComplex {
     frozen: Vec<u32>,
     mark: Vec<u32>,
     epoch: u32,
+    /// Change clock: `touched[v]` is the clock of the last change to a tetrahedron of `v`'s star
+    /// (made, removed, reshaped or restored), `failed[t]` the clock at which every topological
+    /// operation on slot `t` last failed ([`Self::known_to_fail`]).
+    clock: u64,
+    touched: Vec<u64>,
+    failed: Vec<u64>,
+    /// The clock at which removing an edge `(a, b)` (sorted), or a face from apex `a`'s side to apex `b` (sorted face)
+    /// last failed: the operation reads only the tetrahedra holding both apexes.
+    failed_edges: IdMap<(u32, u32), u64>,
+    failed_faces: IdMap<(u32, u32, [u32; 3]), u64>,
+    /// Per slot: the quality ([`super::measure::quality`]) and one more than the clock it was
+    /// computed at; current while no vertex of the tetrahedron was touched since.
+    quality_cache: std::cell::RefCell<Vec<(u64, f64)>>,
+    /// The clock at which smoothing a vertex last found no move.
+    failed_smoothing: Vec<u64>,
     live: usize,
     max_tets: usize,
     max_points: usize,
@@ -281,6 +298,13 @@ impl TetComplex {
             frozen: Vec::new(),
             mark: vec![0; tets.len()],
             epoch: 0,
+            clock: 0,
+            touched: vec![0; points.len()],
+            failed: Vec::new(),
+            failed_edges: IdMap::default(),
+            failed_faces: IdMap::default(),
+            failed_smoothing: Vec::new(),
+            quality_cache: std::cell::RefCell::new(Vec::new()),
             live: tets.len(),
             max_tets,
             max_points,
@@ -355,6 +379,125 @@ impl TetComplex {
         if let Some(s) = self.kinds.get_mut(v as usize) {
             *s = k;
         }
+        self.touch_star(v);
+    }
+
+    // ---- change clock ----
+
+    fn touch(&mut self, vs: &[u32]) {
+        self.clock += 1;
+        for &v in vs {
+            if let Some(s) = self.touched.get_mut(v as usize) {
+                *s = self.clock;
+            }
+        }
+    }
+
+    /// Touch `v` and every vertex of its star (moving `v` reshapes those tetrahedra).
+    fn touch_star(&mut self, v: u32) {
+        let mut vs = vec![v];
+        for &t in self.vtets.get(v as usize).map(Vec::as_slice).unwrap_or_default() {
+            vs.extend(self.tets.get(t as usize).copied().unwrap_or([NONE; 4]));
+        }
+        self.touch(&vs);
+    }
+
+    /// The last change near tetrahedron `t`: in the stars of its vertices and of its neighbours'
+    /// vertices, the region every topological operation on `t` reads.
+    fn stamp(&self, t: u32) -> Result<u64> {
+        let mut m = 0;
+        let mut look = |vs: [u32; 4]| {
+            for v in vs {
+                m = m.max(self.touched.get(v as usize).copied().unwrap_or(u64::MAX));
+            }
+        };
+        look(self.tet(t)?);
+        for n in self.adj(t)? {
+            if n != NONE {
+                look(self.tet(n)?);
+            }
+        }
+        Ok(m)
+    }
+
+    fn touched_at(&self, v: u32) -> u64 {
+        self.touched.get(v as usize).copied().unwrap_or(u64::MAX)
+    }
+
+    /// Record that removing edge `ab` failed now.
+    pub fn mark_edge_failed(&mut self, a: u32, b: u32) {
+        self.failed_edges.insert(sorted2(a, b), self.clock);
+    }
+
+    /// Whether removing edge `ab` failed and no tetrahedron around `a` or `b` changed since.
+    pub fn edge_known_to_fail(&self, a: u32, b: u32) -> bool {
+        self.failed_edges.get(&sorted2(a, b)).is_some_and(|&f| self.touched_at(a).max(self.touched_at(b)) <= f)
+    }
+
+    /// Record that removing `face` between apexes `a` and `b` failed now.
+    pub fn mark_face_failed(&mut self, a: u32, b: u32, face: [u32; 3]) {
+        self.failed_faces.insert((a, b, sorted3(face)), self.clock);
+    }
+
+    /// Whether removing `face` between `a` and `b` failed and nothing around them changed since.
+    pub fn face_known_to_fail(&self, a: u32, b: u32, face: [u32; 3]) -> bool {
+        self.failed_faces.get(&(a, b, sorted3(face))).is_some_and(|&f| self.touched_at(a).max(self.touched_at(b)) <= f)
+    }
+
+    /// The quality of live tetrahedron `t`, computed once per change of its vertices.
+    pub fn slot_quality(&self, t: u32) -> Result<f64> {
+        let vs = self.tet(t)?;
+        let stamp = vs.iter().map(|&v| self.touched_at(v)).max().unwrap_or(u64::MAX);
+        let i = t as usize;
+        if let Some(&(c, q)) = self.quality_cache.borrow().get(i)
+            && c > stamp
+        {
+            return Ok(q);
+        }
+        let q = super::measure::quality(&self.coords(vs)?);
+        let mut cache = self.quality_cache.borrow_mut();
+        if cache.len() <= i {
+            cache.resize(i + 1, (0, 0.0));
+        }
+        if let Some(e) = cache.get_mut(i) {
+            *e = (self.clock + 1, q);
+        }
+        Ok(q)
+    }
+
+    /// Record that smoothing `v` found no move now.
+    pub fn mark_smoothing_failed(&mut self, v: u32) {
+        let i = v as usize;
+        if self.failed_smoothing.len() <= i {
+            self.failed_smoothing.resize(i + 1, 0);
+        }
+        if let Some(f) = self.failed_smoothing.get_mut(i) {
+            *f = self.clock;
+        }
+    }
+
+    /// Whether smoothing `v` found no move and no tetrahedron around it changed since.
+    pub fn smoothing_known_to_fail(&self, v: u32) -> bool {
+        self.failed_smoothing.get(v as usize).is_some_and(|&f| f > 0 && self.touched_at(v) <= f)
+    }
+
+    /// Record that every topological operation on `t` failed now.
+    pub fn mark_failed(&mut self, t: u32) {
+        let i = t as usize;
+        if self.failed.len() <= i {
+            self.failed.resize(i + 1, 0);
+        }
+        if let Some(f) = self.failed.get_mut(i) {
+            *f = self.clock;
+        }
+    }
+
+    /// Whether the topological operations on `t` failed and nothing they read has changed
+    /// since, so trying again would fail the same way (they are deterministic functions of that
+    /// region).
+    pub fn known_to_fail(&self, t: u32) -> Result<bool> {
+        let Some(&f) = self.failed.get(t as usize) else { return Ok(false) };
+        Ok(f > 0 && self.stamp(t)? <= f)
     }
 
     pub fn slots(&self) -> usize {
@@ -424,6 +567,7 @@ impl TetComplex {
 
     pub fn set_curve(&mut self, a: u32, b: u32, curve: Option<u32>) {
         let key = sorted2(a, b);
+        self.touch(&[a, b]);
         let before = match curve {
             Some(c) => self.curves.insert(key, c),
             None => self.curves.remove(&key),
@@ -688,6 +832,7 @@ impl TetComplex {
         self.pts.push(p);
         self.kinds.push(kind);
         self.vtets.push(Vec::new());
+        self.touched.push(self.clock);
         if self.journal.recording {
             self.journal.steps.push(Step::Added { v });
         }
@@ -695,7 +840,7 @@ impl TetComplex {
     }
 
     /// The data a change of `slots` and of the incidence of `verts` would overwrite.
-    fn snapshot(&self, slots: &[u32], verts: &[u32]) -> Raw {
+    fn snapshot(&self, slots: &[u32], verts: &[u32], takes: usize) -> Raw {
         let mut ids: Vec<u32> = slots.to_vec();
         ids.sort_unstable();
         ids.dedup();
@@ -711,7 +856,8 @@ impl TetComplex {
                 })
                 .collect(),
             tets_len: self.tets.len(),
-            free: self.free.clone(),
+            free_len: self.free.len(),
+            free_tail: self.free.get(self.free.len().saturating_sub(takes)..).unwrap_or_default().to_vec(),
             vtets: vs.into_iter().filter_map(|v| Some((v, self.vtets.get(v as usize)?.clone()))).collect(),
             live: self.live,
         }
@@ -719,6 +865,12 @@ impl TetComplex {
 
     /// Put back what [`Self::snapshot`] saved.
     fn restore(&mut self, raw: Raw) {
+        let mut touched: Vec<u32> = raw.vtets.iter().map(|(v, _)| *v).collect();
+        for (t, vs, _, _) in &raw.slots {
+            touched.extend(self.tets.get(*t as usize).copied().unwrap_or([NONE; 4]));
+            touched.extend(vs);
+        }
+        self.touch(&touched);
         for (v, l) in raw.vtets {
             if let Some(s) = self.vtets.get_mut(v as usize) {
                 *s = l;
@@ -734,7 +886,8 @@ impl TetComplex {
         self.adj.truncate(raw.tets_len);
         self.tags.truncate(raw.tets_len);
         self.mark.truncate(raw.tets_len);
-        self.free = raw.free;
+        self.free.truncate(raw.free_len.saturating_sub(raw.free_tail.len()));
+        self.free.extend(raw.free_tail);
         self.live = raw.live;
     }
 
@@ -744,6 +897,7 @@ impl TetComplex {
             self.pts.pop();
             self.kinds.pop();
             self.vtets.pop();
+            self.touched.pop();
             return Ok(());
         }
         Err(corrupt("dropping a vertex in use"))
@@ -755,6 +909,7 @@ impl TetComplex {
         let slot = self.pts.get_mut(v as usize).ok_or_else(|| corrupt("vertex id"))?;
         let from = *slot;
         *slot = p;
+        self.touch_star(v);
         if self.journal.recording {
             self.journal.steps.push(Step::Moved { v, from });
         }
@@ -962,7 +1117,7 @@ impl TetComplex {
             for &t in old {
                 verts.extend(self.tet(t)?);
             }
-            Some(Box::new(self.snapshot(&slots, &verts)))
+            Some(Box::new(self.snapshot(&slots, &verts, change.new.len())))
         } else {
             None
         };
@@ -1002,6 +1157,9 @@ impl TetComplex {
                 }
             }
         }
+        let mut changed: Vec<u32> = removed.iter().flat_map(|r| r.vs).collect();
+        changed.extend(change.new.iter().flatten());
+        self.touch(&changed);
         self.live = self.live - old.len() + ids.len();
         if self.journal.recording {
             self.journal.steps.push(Step::Replaced { removed, added: change.new.clone(), raw: raw.unwrap_or_default() });
@@ -1044,7 +1202,7 @@ impl TetComplex {
                 return Ok(false);
             }
         }
-        let raw = self.journal.recording.then(|| Box::new(self.snapshot(&[t, ns[k], ns[l]], &vs)));
+        let raw = self.journal.recording.then(|| Box::new(self.snapshot(&[t, ns[k], ns[l]], &vs, 0)));
         for m in [k, l] {
             let n = ns[m];
             let nn = self.adj(n)?;
@@ -1055,6 +1213,7 @@ impl TetComplex {
             }
         }
         self.unlink(t, vs);
+        self.touch(&vs);
         if let Some(s) = self.tets.get_mut(t as usize) {
             *s = [DEAD; 4];
         }
@@ -1122,15 +1281,18 @@ impl TetComplex {
                     if let Some(s) = self.pts.get_mut(v as usize) {
                         *s = from;
                     }
+                    self.touch_star(v);
                 }
                 Step::Added { v } => {
                     if v as usize + 1 == self.pts.len() {
                         self.pts.pop();
                         self.kinds.pop();
                         self.vtets.pop();
+                        self.touched.pop();
                     }
                 }
                 Step::Curve { edge, curve } => {
+                    self.touch(&[edge.0, edge.1]);
                     match curve {
                         Some(c) => self.curves.insert(edge, c),
                         None => self.curves.remove(&edge),

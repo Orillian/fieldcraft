@@ -24,7 +24,7 @@ use super::complex::{EDGES, IdMap, NONE, Step, TetComplex, VertexKind, Walk, fac
 use super::measure::{self, P};
 use super::ops::{self, Site, remove_edge_at, remove_face, tet_quality};
 use super::refine::{Context, MAX_CAVITY, MIN_GAP};
-use super::smooth::smooth_vertex;
+use super::smooth::{smooth_vertex, smooth_vertex_below};
 
 /// Settings of the schedule.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +53,8 @@ pub struct ImproveStats {
     pub smoothed: usize,
     pub topological: usize,
     pub inserted: usize,
+    /// Insertions tried (kept or undone).
+    pub attempted: usize,
     /// The worst quality (smallest dihedral sine) after each pass.
     pub worst: Vec<f64>,
     pub stopped: Option<String>,
@@ -81,8 +83,8 @@ fn indicators(cx: &TetComplex) -> Result<[f64; 8]> {
     let mut out = [0.0; 8];
     out[0] = f64::INFINITY;
     let mut n = 0usize;
-    for (_, vs) in cx.live_tets() {
-        let q = tet_quality(cx, vs)?;
+    for (t, _) in cx.live_tets() {
+        let q = cx.slot_quality(t)?;
         out[0] = out[0].min(q);
         for (i, s) in SIN_DEG.iter().enumerate() {
             out[i + 1] += q.min(*s);
@@ -102,8 +104,8 @@ fn progressed(now: &[f64; 8], before: &[f64; 8]) -> bool {
 /// Smooth every movable vertex of a tetrahedron below `good`. Returns the moves.
 fn smoothing_pass(cx: &mut TetComplex, ctx: &Context, good: f64) -> Result<usize> {
     let mut want = vec![false; cx.point_count()];
-    for (_, vs) in cx.live_tets() {
-        if tet_quality(cx, vs)? < good {
+    for (t, vs) in cx.live_tets() {
+        if cx.slot_quality(t)? < good {
             for v in vs {
                 if let Some(w) = want.get_mut(v as usize) {
                     *w = true;
@@ -149,7 +151,7 @@ fn delete_flat(cx: &mut TetComplex, t: u32) -> Result<bool> {
 /// edge ([`ops::collapse`]), which takes the tetrahedron away.
 fn collapse_into_crease(cx: &mut TetComplex, t: u32) -> Result<bool> {
     let vs = cx.tet(t)?;
-    if tet_quality(cx, vs)? > 0.1 {
+    if cx.slot_quality(t)? > 0.1 {
         return Ok(false);
     }
     let (ns, tags) = (cx.adj(t)?, cx.tags(t)?);
@@ -182,7 +184,7 @@ fn collapse_into_crease(cx: &mut TetComplex, t: u32) -> Result<bool> {
 pub fn topological_pass(cx: &mut TetComplex, list: &[u32]) -> Result<usize> {
     let mut changes = 0;
     for &t in list {
-        if !cx.is_live(t) {
+        if !cx.is_live(t) || cx.known_to_fail(t)? {
             continue;
         }
         let vs = cx.tet(t)?;
@@ -201,11 +203,16 @@ pub fn topological_pass(cx: &mut TetComplex, list: &[u32]) -> Result<usize> {
             changes += 1;
             continue;
         }
+        let mut removed = false;
         for k in 0..4 {
             if remove_face(cx, t, k)? {
                 changes += 1;
+                removed = true;
                 break;
             }
+        }
+        if !removed {
+            cx.mark_failed(t);
         }
     }
     Ok(changes)
@@ -213,8 +220,8 @@ pub fn topological_pass(cx: &mut TetComplex, list: &[u32]) -> Result<usize> {
 
 fn below(cx: &TetComplex, good: f64) -> Result<Vec<u32>> {
     let mut out = Vec::new();
-    for (t, vs) in cx.live_tets() {
-        if tet_quality(cx, vs)? < good {
+    for (t, _) in cx.live_tets() {
+        if cx.slot_quality(t)? < good {
             out.push(t);
         }
     }
@@ -288,7 +295,8 @@ fn change_quality(cx: &mut TetComplex, len: usize) -> Result<(f64, f64)> {
 }
 
 /// The composite insertion of §3.5 (see the module docs). Returns whether it was kept.
-fn attempt_insert(cx: &mut TetComplex, ctx: &Context, p: Point3, kind: VertexKind, site: Site) -> Result<bool> {
+fn attempt_insert(cx: &mut TetComplex, ctx: &Context, attempted: &mut usize, good: f64, p: Point3, kind: VertexKind, site: Site) -> Result<bool> {
+    *attempted += 1;
     let was = cx.journal.recording;
     cx.journal.recording = true;
     let len = cx.journal.steps.len();
@@ -303,8 +311,15 @@ fn attempt_insert(cx: &mut TetComplex, ctx: &Context, p: Point3, kind: VertexKin
             if !cx.is_used(v) {
                 break;
             }
-            let star = cx.star(v)?;
-            if topological_pass(cx, &star)? == 0 {
+            // Only the tetrahedra below the threshold, as in the passes.
+            let mut star = cx.star(v)?;
+            let mut keep = Vec::with_capacity(star.len());
+            for &t in &star {
+                keep.push(cx.slot_quality(t)? < good);
+            }
+            let mut flags = keep.into_iter();
+            star.retain(|_| flags.next().unwrap_or(false));
+            if star.is_empty() || topological_pass(cx, &star)? == 0 {
                 break;
             }
         }
@@ -312,7 +327,7 @@ fn attempt_insert(cx: &mut TetComplex, ctx: &Context, p: Point3, kind: VertexKin
             let mut around: Vec<u32> = cx.neighbours(v)?;
             around.push(v);
             for u in around {
-                smooth_vertex(cx, ctx, u)?;
+                smooth_vertex_below(cx, ctx, u, good)?;
             }
         }
         let (before, after) = change_quality(cx, len)?;
@@ -337,7 +352,7 @@ fn attempt_insert(cx: &mut TetComplex, ctx: &Context, p: Point3, kind: VertexKin
 }
 
 /// Try inserting a vertex in each tetrahedron of `list` (§4.2). Returns the insertions kept.
-fn insertion_pass(cx: &mut TetComplex, ctx: &Context, list: &[u32], budget: usize, good: f64) -> Result<usize> {
+fn insertion_pass(cx: &mut TetComplex, ctx: &Context, list: &[u32], budget: usize, good: f64, attempted: &mut usize) -> Result<usize> {
     let mut kept = 0;
     for &t in list {
         if kept >= budget {
@@ -347,7 +362,7 @@ fn insertion_pass(cx: &mut TetComplex, ctx: &Context, list: &[u32], budget: usiz
             continue;
         }
         let vs = cx.tet(t)?;
-        if tet_quality(cx, vs)? >= good {
+        if cx.slot_quality(t)? >= good {
             continue;
         }
         let ns = cx.adj(t)?;
@@ -374,7 +389,7 @@ fn insertion_pass(cx: &mut TetComplex, ctx: &Context, list: &[u32], budget: usiz
                     let target = measure::add(measure::mid(pa, pb), measure::scale(inward, 0.4 * l / len));
                     if let Ok(p) = Point3::try_from(target)
                         && let Some(Walk::Inside(at)) = cx.walk(t, &p, 1 << 12)?
-                        && attempt_insert(cx, ctx, p, VertexKind::Interior, Site::Interior(at))?
+                        && attempt_insert(cx, ctx, attempted, good, p, VertexKind::Interior, Site::Interior(at))?
                     {
                         done = true;
                     }
@@ -391,7 +406,7 @@ fn insertion_pass(cx: &mut TetComplex, ctx: &Context, list: &[u32], budget: usiz
             let kind = VertexKind::Face(tags[k]);
             if let Some(p) = ctx.place(kind, g)
                 && cx.is_live(t)
-                && attempt_insert(cx, ctx, p, kind, Site::Face(t, k))?
+                && attempt_insert(cx, ctx, attempted, good, p, kind, Site::Face(t, k))?
             {
                 done = true;
             }
@@ -400,7 +415,7 @@ fn insertion_pass(cx: &mut TetComplex, ctx: &Context, list: &[u32], budget: usiz
         if !done && cx.is_live(t) && cx.tet(t)? == vs {
             let g = measure::centroid(&cx.coords(vs)?);
             if let Ok(p) = Point3::try_from(g)
-                && attempt_insert(cx, ctx, p, VertexKind::Interior, Site::Interior(t))?
+                && attempt_insert(cx, ctx, attempted, good, p, VertexKind::Interior, Site::Interior(t))?
             {
                 done = true;
             }
@@ -430,7 +445,7 @@ fn insertion_pass(cx: &mut TetComplex, ctx: &Context, list: &[u32], budget: usiz
                 };
                 let m = measure::mid(cx.xyz(a)?, cx.xyz(b)?);
                 if let Some(p) = ctx.place(kind, m)
-                    && attempt_insert(cx, ctx, p, kind, Site::Edge(a, b))?
+                    && attempt_insert(cx, ctx, attempted, good, p, kind, Site::Edge(a, b))?
                 {
                     done = true;
                     break;
@@ -479,8 +494,8 @@ pub fn improve(cx: &mut TetComplex, ctx: &Context, o: &ImproveOptions) -> Result
             // The worst 3.5% of the tetrahedra, or (desperation pass, §4.2) every one with a
             // dihedral angle below 40° or above 140° (sine below sin 40°).
             let mut scored: Vec<(f64, u32)> = Vec::new();
-            for (t, vs) in cx.live_tets() {
-                scored.push((tet_quality(cx, vs)?, t));
+            for (t, _) in cx.live_tets() {
+                scored.push((cx.slot_quality(t)?, t));
             }
             scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
             let list: Vec<u32> = if failed == 1 {
@@ -490,7 +505,7 @@ pub fn improve(cx: &mut TetComplex, ctx: &Context, o: &ImproveOptions) -> Result
                 scored.iter().take(n).map(|s| s.1).collect()
             };
             let budget = o.max_insertions - stats.inserted;
-            stats.inserted += insertion_pass(cx, ctx, &list, budget, o.good)?;
+            stats.inserted += insertion_pass(cx, ctx, &list, budget, o.good, &mut stats.attempted)?;
         }
         let now = indicators(cx)?;
         carried = Some(now);
@@ -548,7 +563,7 @@ mod tests {
                 let q = Point3::try_from(q).unwrap();
                 if let Some(Walk::Inside(at)) = cx.walk(t, &q, 1 << 12).unwrap() {
                     tried += 1;
-                    assert!(!attempt_insert(&mut cx, &ctx, q, VertexKind::Interior, Site::Interior(at)).unwrap());
+                    assert!(!attempt_insert(&mut cx, &ctx, &mut 0, SIN_40, q, VertexKind::Interior, Site::Interior(at)).unwrap());
                 }
             }
         }

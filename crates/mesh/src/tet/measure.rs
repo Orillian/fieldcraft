@@ -76,13 +76,39 @@ pub fn dihedral_cosines(x: &[P; 4]) -> [f64; 6] {
 
 /// The quality objective of a valid tetrahedron: the smaller of its smallest dihedral sine and
 /// its weighted scaled Jacobian ([`JACOBIAN_WEIGHT`]; the regular tetrahedron scores
-/// √(8/9) ≈ 0.943). The dihedral sine catches slivers and caps; it does not see needles, whose
-/// dihedral angles can all be fine while a corner is nearly flat (Shewchuk 2002), and the scaled
-/// Jacobian `√2 · 6V / (ℓ₁ℓ₂ℓ₃)` at the worst corner, the measure analysts check (the skill's
-/// limit, [`crate::quality`]), does. 0 for a flat tetrahedron; for an inverted one the negative
-/// sine of largest magnitude, so worse inversions score lower. Extremes are found on squared
-/// lengths and areas, with one square root each.
+/// √(8/9) ≈ 0.943). The dihedral sine
+/// catches slivers and caps; it does not see needles, whose dihedral angles can all be fine
+/// while a corner is nearly flat (Shewchuk 2002), and the scaled Jacobian
+/// `√2 · 6V / (ℓ₁ℓ₂ℓ₃)` at the worst corner, the measure analysts check (the skill's ≥ 0.2,
+/// [`crate::quality`]), does. 0 for a flat tetrahedron; for an inverted one the negative sine of
+/// largest magnitude, so worse inversions score lower. Extremes are found on squared lengths and
+/// areas, with one square root each.
 pub fn quality(x: &[P; 4]) -> f64 {
+    quality_in_order(&canonical_order(x))
+}
+
+/// The corners reordered by an even permutation that depends only on the corners' positions
+/// (sorted by coordinates, the last two swapped back when the sort was odd), so a measure
+/// computed on it gives the same bits for every listing of a tetrahedron with the same
+/// orientation: a removal tried from either side of a ring sees the same qualities.
+fn canonical_order(x: &[P; 4]) -> [P; 4] {
+    let less = |a: &P, b: &P| a[0] < b[0] || (a[0] == b[0] && (a[1] < b[1] || (a[1] == b[1] && a[2] < b[2])));
+    let mut y = *x;
+    let mut odd = false;
+    // A sorting network on four (pairs 01, 23, 02, 13, 12), counting swaps for the parity.
+    for (i, j) in [(0, 1), (2, 3), (0, 2), (1, 3), (1, 2)] {
+        if less(&y[j], &y[i]) {
+            y.swap(i, j);
+            odd = !odd;
+        }
+    }
+    if odd {
+        y.swap(2, 3);
+    }
+    y
+}
+
+fn quality_in_order(x: &[P; 4]) -> f64 {
     let v6 = volume6(x);
     if v6 == 0.0 || !v6.is_finite() {
         return 0.0;
@@ -102,12 +128,6 @@ pub fn quality(x: &[P; 4]) -> f64 {
     if q.is_finite() { q } else { 0.0 }
 }
 
-/// The weight of the scaled Jacobian in [`quality`]: the meshing skill's limit, a scaled
-/// Jacobian of 0.3, counts as much as a 30° dihedral angle (sin 30°, the improvement's target,
-/// [`super::improve::ImproveOptions::target`]), so the Jacobian decides only for tetrahedra near
-/// that limit (needles) and the dihedral sine everywhere else.
-pub const JACOBIAN_WEIGHT: f64 = 0.5 / 0.3;
-
 /// The corners of a tetrahedron and the other three corners of each.
 const CORNERS: [(usize, [usize; 3]); 4] = [(0, [1, 2, 3]), (1, [0, 2, 3]), (2, [0, 1, 3]), (3, [0, 1, 2])];
 
@@ -126,6 +146,100 @@ fn corner_products(x: &[P; 4]) -> [f64; 4] {
 fn scaled_jacobian(x: &[P; 4], v6: f64) -> f64 {
     let worst = corner_products(x).iter().fold(0.0_f64, |m, &p| m.max(p));
     std::f64::consts::SQRT_2 * v6 / worst.sqrt()
+}
+
+/// The weight of the scaled Jacobian in [`quality`]: the meshing skill's limit, a scaled
+/// Jacobian of 0.3, counts as much as a 30° dihedral angle (sin 30°, the improvement's target,
+/// [`super::improve::ImproveOptions::target`]), so the Jacobian decides only for tetrahedra near
+/// that limit (needles) and the dihedral sine everywhere else.
+pub const JACOBIAN_WEIGHT: f64 = 0.5 / 0.3;
+
+/// [`quality`] and its gradient with respect to corner `i`, for a positive tetrahedron: the
+/// gradient of the term [`quality`] picks (the smallest dihedral sine, or the scaled Jacobian at
+/// the worst corner, `∇ ln J = ∇V₆ / V₆ − Σ ∇ℓ / ℓ` over that corner's edges), analytic, as Klingner and
+/// Shewchuk (§3.1) and Freitag and Ollivier-Gooch use for smoothing. With
+/// `s = V₆ ℓ / (N_k N_l)` (`N` twice a face's area),
+/// `∇s = s (∇V₆ / V₆ + ∇ℓ / ℓ − ∇N_k / N_k − ∇N_l / N_l)`, where `∇V₆` at a corner is its
+/// opposite face's area vector, `∇ℓ` the unit edge vector at an end of the edge and, for a face
+/// `(p, q, r)` with unit normal `n̂`, `∇_p N = (q − r) × n̂`. A flat or inverted tetrahedron
+/// gets a zero gradient (smoothing only moves within valid positions).
+pub fn quality_gradient(x: &[P; 4], i: usize) -> (f64, P) {
+    let q = quality(x);
+    let v6 = volume6(x);
+    if !(v6 > 0.0 && q > 0.0) || i > 3 {
+        return (q, [0.0; 3]);
+    }
+    let crosses = [0, 1, 2, 3].map(|k| face_cross(x, k));
+    let n2 = crosses.map(|c| dot(c, c));
+    // The edge whose sine is smallest (the same comparison as `quality`).
+    let mut pick = (f64::INFINITY, EDGE_FACES[0]);
+    for e in EDGE_FACES {
+        let (a, b, k, l) = e;
+        let d = sub(x[a], x[b]);
+        let r = dot(d, d) / (n2[k] * n2[l]);
+        if r < pick.0 {
+            pick = (r, e);
+        }
+    }
+    // The scaled Jacobian branch, when it is the smaller.
+    let products = corner_products(x);
+    let (c, cp) = products.iter().enumerate().fold((0, 0.0_f64), |m, (c, &p)| if p > m.1 { (c, p) } else { m });
+    let sj = JACOBIAN_WEIGHT * std::f64::consts::SQRT_2 * v6 / cp.sqrt();
+    let sine = v6 * pick.0.sqrt();
+    let face = |k: usize| -> [usize; 3] {
+        match k {
+            0 => [1, 2, 3],
+            1 => [0, 2, 3],
+            2 => [0, 1, 3],
+            _ => [0, 1, 2],
+        }
+    };
+    // ∇V₆ at corner i: the area vector of the face opposite i, signed so that V₆ grows along it.
+    let gi = crosses[i];
+    let gv = if dot(gi, sub(x[i], x[face(i)[0]])) < 0.0 { scale(gi, -1.0) } else { gi };
+    if sj < sine {
+        // ∇ ln sj = ∇V₆ / V₆ − Σ ∇ℓ / ℓ over the corner's edges at i.
+        let (corner, others) = CORNERS[c];
+        let mut g = scale(gv, 1.0 / v6);
+        for j in others {
+            let (p, o) = if i == corner {
+                (x[i], x[j])
+            } else if i == j {
+                (x[i], x[corner])
+            } else {
+                continue;
+            };
+            let e = sub(p, o);
+            g = sub(g, scale(e, 1.0 / dot(e, e)));
+        }
+        let g = scale(g, q);
+        return if g.iter().all(|c| c.is_finite()) { (q, g) } else { (q, [0.0; 3]) };
+    }
+    let (a, b, k, l) = pick.1;
+    let len = dist(x[a], x[b]);
+    let gl = if i == a {
+        scale(sub(x[a], x[b]), 1.0 / len)
+    } else if i == b {
+        scale(sub(x[b], x[a]), 1.0 / len)
+    } else {
+        [0.0; 3]
+    };
+    // ∇N of the face opposite m at corner i (zero when the face does not hold i).
+    let gn = |m: usize| -> P {
+        let f = face(m);
+        let Some(pos) = f.iter().position(|&c| c == i) else { return [0.0; 3] };
+        let n = crosses[m];
+        let nn = norm(n);
+        if !(nn > 0.0) {
+            return [0.0; 3];
+        }
+        let (qv, rv) = (x[f[(pos + 1) % 3]], x[f[(pos + 2) % 3]]);
+        scale(cross(sub(qv, rv), n), 1.0 / nn)
+    };
+    let (nk, nl) = (n2[k].sqrt(), n2[l].sqrt());
+    let g = add(add(scale(gv, 1.0 / v6), scale(gl, 1.0 / len)), scale(add(scale(gn(k), 1.0 / nk), scale(gn(l), 1.0 / nl)), -1.0));
+    let g = scale(g, q);
+    if g.iter().all(|c| c.is_finite()) { (q, g) } else { (q, [0.0; 3]) }
 }
 
 /// The smallest and largest dihedral angle in degrees (reports only).
@@ -251,6 +365,16 @@ mod tests {
         assert!(circumcenter(&flat).is_none());
     }
 
+    /// Every even reordering of the corners gives the same quality, bit for bit.
+    #[test]
+    fn quality_does_not_depend_on_the_corner_order() {
+        let x = positive([[0.1, 0.0, 0.05], [1.0, 0.2, 0.0], [0.3, 0.9, 0.1], [0.4, 0.35, 0.7]]);
+        let q = quality(&x);
+        for p in [[1, 2, 0, 3], [2, 0, 1, 3], [0, 2, 3, 1], [3, 1, 0, 2], [1, 0, 3, 2], [2, 3, 0, 1]] {
+            assert_eq!(quality(&p.map(|i| x[i])).to_bits(), q.to_bits(), "{p:?}");
+        }
+    }
+
     /// A needle: every dihedral angle above 20°, yet one corner nearly flat; the objective sees
     /// it through the scaled Jacobian.
     #[test]
@@ -259,6 +383,29 @@ mod tests {
         let (lo, hi) = dihedral_range(&x);
         assert!(lo > 20.0 && hi < 120.0, "{lo} {hi}");
         assert!(quality(&x) < 0.15 * JACOBIAN_WEIGHT, "{}", quality(&x));
+    }
+
+    /// The analytic gradient matches central differences of the quality away from ties, on
+    /// either branch.
+    #[test]
+    fn quality_gradient_matches_central_differences() {
+        let sliverish = positive([[0.1, 0.0, 0.05], [1.0, 0.2, 0.0], [0.3, 0.9, 0.1], [0.4, 0.35, 0.7]]);
+        let needle = positive([[0.0, 0.0, 0.0], [1.0, 0.1, 0.0], [0.45, 0.85, 0.05], [0.55, 0.3, 6.0]]);
+        for x in [sliverish, needle] {
+            for i in 0..4 {
+                let (q, g) = quality_gradient(&x, i);
+                assert_eq!(q, quality(&x));
+                let h = 1e-7;
+                for c in 0..3 {
+                    let (mut a, mut b) = (x, x);
+                    a[i][c] += h;
+                    b[i][c] -= h;
+                    let fd = (quality(&a) - quality(&b)) / (2.0 * h);
+                    assert!((fd - g[c]).abs() < 1e-6, "corner {i} axis {c}: {fd} vs {}", g[c]);
+                }
+            }
+        }
+        assert_eq!(quality_gradient(&[[0.0; 3]; 4], 0).1, [0.0; 3]);
     }
 
     #[test]

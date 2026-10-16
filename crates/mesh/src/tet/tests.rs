@@ -443,7 +443,7 @@ mod determinism {
             })
             .fold(f64::INFINITY, f64::min);
         assert!(sj >= 0.3, "min scaled Jacobian {sj}");
-        assert_eq!(fingerprint(&m), 11_252_377_805_886_396_373, "{} tets, {} nodes", m.elements.len(), m.points.len());
+        assert_eq!(fingerprint(&m), 13_918_536_535_603_991_107, "{} tets, {} nodes", m.elements.len(), m.points.len());
     }
 
     /// Listing the triangles, their corners and the vertices in another order, and numbering
@@ -506,4 +506,63 @@ fn the_gate_refuses_a_detached_tetrahedron() {
     let e = super::linear_gate(&p, &tets, v).unwrap_err().to_string();
     assert!(e.contains("share no face") && e.contains("(1, 2)"), "{e}");
     assert!(super::linear_gate(&p, &tets[..1], v / 2.0).is_ok());
+}
+
+/// Undoing an edge removal or a face removal puts every slot back as it was.
+#[test]
+fn rollback_restores_every_slot() {
+    use crate::cdt::{CdtOptions, tetrahedralize};
+    use crate::surface::{BoundarySurface, SurfaceOptions};
+    let (p, t, f) = determinism::washer();
+    let s = BoundarySurface::new(&p, &t, &f, &SurfaceOptions::default()).unwrap();
+    let cdt = tetrahedralize(&s, &CdtOptions::default()).unwrap();
+    let (mut cx, _) = crate::tet::complex_from_cdt(&s, &cdt, &crate::tet::QualityOptions::default()).unwrap();
+    let state = |cx: &TetComplex| -> Vec<([u32; 4], [u32; 4], [u32; 4])> {
+        (0..cx.slots() as u32).map(|t| (cx.tet(t).unwrap(), cx.adj(t).unwrap(), cx.tags(t).unwrap())).collect()
+    };
+    let mut changed = 0;
+    for (t, vs) in cx.live_tets().collect::<Vec<_>>() {
+        for &(i, j) in &EDGES {
+            for op in 0..2 {
+                let before = state(&cx);
+                cx.journal.recording = true;
+                let len = cx.journal.steps.len();
+                let did = if op == 0 { remove_edge_at(&mut cx, t, vs[i], vs[j]).unwrap() } else { remove_face(&mut cx, t, i).unwrap() };
+                changed += usize::from(did);
+                cx.rollback(len).unwrap();
+                cx.journal.steps.truncate(len);
+                cx.journal.recording = false;
+                assert_eq!(state(&cx), before, "tet {t} edge {i}{j} op {op}");
+            }
+        }
+    }
+    assert!(changed > 0);
+}
+
+/// The cached qualities match a fresh computation after improvement (smoothing, flips,
+/// insertions and the rollbacks of rejected insertions).
+#[test]
+fn cached_qualities_match_fresh_ones() {
+    use crate::cdt::{CdtOptions, tetrahedralize};
+    use crate::size::UniformSize;
+    use crate::surface::{BoundarySurface, SurfaceOptions};
+    use crate::tet::geometry::Tessellation;
+    use crate::tet::refine::Context;
+    let (p, t, f) = determinism::washer();
+    let s = BoundarySurface::new(&p, &t, &f, &SurfaceOptions::default()).unwrap();
+    let cdt = tetrahedralize(&s, &CdtOptions::default()).unwrap();
+    let (mut cx, curve_faces) = crate::tet::complex_from_cdt(&s, &cdt, &crate::tet::QualityOptions::default()).unwrap();
+    let (geometry, size) = (Tessellation::new(&s, Vec::new()), UniformSize(3.0));
+    let ctx = Context { size: &size, geometry: &geometry, curve_faces: &curve_faces };
+    // Fill the cache, then change the mesh.
+    for (t, _) in cx.live_tets().collect::<Vec<_>>() {
+        cx.slot_quality(t).unwrap();
+    }
+    let o = crate::tet::improve::ImproveOptions { max_passes: 3, ..Default::default() };
+    let stats = crate::tet::improve::improve(&mut cx, &ctx, &o).unwrap();
+    assert!(stats.attempted > 0 && stats.smoothed > 0, "{stats:?}");
+    for (t, vs) in cx.live_tets().collect::<Vec<_>>() {
+        assert_eq!(cx.slot_quality(t).unwrap().to_bits(), measure::quality(&cx.coords(vs).unwrap()).to_bits());
+    }
+    cx.validate().unwrap();
 }

@@ -31,7 +31,7 @@ Times are wall clock on the machine that ran it.
 | bolted-assembly | plan (sweep), mesh.hex.generate (auto) | – | 6272 (6272 hex8) | 0.583 | 0.939 | 3.6 | 2.0e-4 | 0 | 0 (not relaxed) | 8 coincident, 0 cracks | – | 3.7 | pass | [x=50.000](skill/bolted-assembly.png) |
 | cantilever-i-beam | plan (sweep) | – | 61600 (61600 hex8) | 1.000 | 1.000 | 1.0 | 0.0e0 | 0 | 0 (not relaxed) | none | – | 8.5 | pass | [x=100.000](skill/cantilever-i-beam.png) |
 | cross-cylinders | none | – | – | – | – | – | – | – | – | – | – | 27.2 | no mesh | – |
-| filleted-bracket | tet10 | – | 19991 (19991 tet10) | 0.318 | 0.564 | 4.1 | -6.8e-6 | 0 | 0 (not relaxed) | none | – | 15.1 | pass (fallback) | [x=30.000](skill/filleted-bracket.png) |
+| filleted-bracket | tet10 | – | 20020 (20020 tet10) | 0.320 | 0.562 | 4.1 | -6.8e-6 | 0 | 0 (not relaxed) | none | – | 12.7 | pass (fallback) | [x=30.000](skill/filleted-bracket.png) |
 | filleted-bracket-blocks | plan (sweep) | – | 75410 (75410 hex8) | 0.704 | 0.954 | 3.5 | 3.7e-5 | 0 | 0 (not relaxed) | none (after merging 2348 nodes) | – | 6.9 | pass | [x=30.000](skill/filleted-bracket-blocks.png) |
 | i-beam | plan (sweep) | – | 61600 (61600 hex8) | 1.000 | 1.000 | 1.0 | 0.0e0 | 0 | 0 (not relaxed) | none | – | 4.5 | pass | [z=100.000](skill/i-beam.png) |
 | loft-transition | plan (sweep) | – | 2873 (2873 hex8) | 0.189 | 0.959 | 1.7 | -2.1e-3 | 0 | 4 → 4 (4 relaxed, 0 undone; min SJ 0.189 → 0.189, max ratio 1.7 → 1.7) | none | – | 0.9 | fail (SJ) | [z=25.000](skill/loft-transition.png) |
@@ -40,7 +40,7 @@ Times are wall clock on the machine that ran it.
 | rounded-box | plan (project) | 2 plane(s) | 11520 (11520 hex8) | 0.717 | 0.973 | 4.0 | -4.1e-3 | 0 | 0 (not relaxed) | none | – | 8.7 | pass | [x=20.000](skill/rounded-box.png) |
 | shallow-groove | plan (sweep) | – | 1960 (1960 hex8) | 0.991 | 0.999 | 1.1 | 2.7e-4 | 0 | 0 (not relaxed) | none | – | 0.2 | pass | [x=30.000](skill/shallow-groove.png) |
 | sharp-wedge | plan (sweep) | – | 1674 (1674 hex8) | 0.014 | 0.301 | 149.6 | 2.7e-15 | 0 | 1524 (not relaxed) | none | – | 0.2 | fail (SJ, ratio) | [x=40.000](skill/sharp-wedge.png) |
-| sphere-on-plate | tet10 | – | 25613 (25613 tet10) | 0.335 | 0.607 | 4.4 | -8.8e-5 | 0 | 0 (not relaxed) | none | – | 7.7 | pass (fallback) | [y=0.000](skill/sphere-on-plate.png) |
+| sphere-on-plate | tet10 | – | 24175 (24175 tet10) | 0.341 | 0.604 | 4.2 | -9.6e-5 | 0 | 0 (not relaxed) | none | – | 6.5 | pass (fallback) | [y=0.000](skill/sphere-on-plate.png) |
 | spline-vase | plan (sweep) | – | 4536 (4536 hex8) | 0.665 | 0.945 | 9.9 | -6.6e-3 | 0 | 0 (not relaxed) | none | – | 2.3 | pass | [z=-35.000](skill/spline-vase.png) |
 | stepped-block | plan (cells) | – | 1416 (1416 hex8) | 1.000 | 1.000 | 1.3 | -4.8e-15 | 0 | 0 (not relaxed) | none | – | 1.6 | pass | [x=30.000](skill/stepped-block.png) |
 | thin-ribs | plan (sweep) | – | 301308 (301308 hex8) | 0.999 | 1.000 | 1.3 | -3.4e-12 | 0 | 0 (not relaxed) | none | – | 34.7 | pass | [x=50.000](skill/thin-ribs.png) |

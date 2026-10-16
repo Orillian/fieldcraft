@@ -31,7 +31,7 @@ pub fn tet_quality(cx: &TetComplex, vs: [u32; 4]) -> Result<f64> {
 pub fn worst(cx: &TetComplex, tets: &[u32]) -> Result<f64> {
     let mut q = f64::INFINITY;
     for &t in tets {
-        q = q.min(tet_quality(cx, cx.tet(t)?)?);
+        q = q.min(cx.slot_quality(t)?);
     }
     Ok(q)
 }
@@ -47,13 +47,17 @@ pub const MAX_RING: usize = 10;
 pub const BOUNDARY_FLIP_COS: f64 = 0.939_692_620_785_908_4;
 
 /// Klincsek's table: the best worst quality of a triangulation of the chain `v_i … v_j`
-/// (with the closing edge `v_i v_j`), and the apex `k` that achieves it.
-fn klincsek(m: usize, q: &mut dyn FnMut(usize, usize, usize) -> Result<f64>) -> Result<(Vec<f64>, Vec<usize>)> {
+/// (with the closing edge `v_i v_j`), and the apex `k` that achieves it. Only triangulations
+/// better than `floor` matter: an entry that cannot beat it holds `floor`, and a triangle is
+/// evaluated only when its two sub-chains beat it, which skips most of the table when the
+/// removal cannot pay off (the decision and the triangulation chosen are the same as without
+/// the floor).
+fn klincsek(m: usize, floor: f64, q: &mut dyn FnMut(usize, usize, usize) -> Result<f64>) -> Result<(Vec<f64>, Vec<usize>)> {
     let mut best = vec![f64::INFINITY; m * m];
     let mut arg = vec![0usize; m * m];
     for i in (0..m.saturating_sub(2)).rev() {
         for j in i + 2..m {
-            let mut b = f64::NEG_INFINITY;
+            let mut b = floor;
             let mut a = i + 1;
             for k in i + 1..j {
                 let sub = best.get(i * m + k).copied().unwrap_or(f64::NEG_INFINITY).min(best.get(k * m + j).copied().unwrap_or(f64::NEG_INFINITY));
@@ -115,12 +119,31 @@ pub fn remove_edge_at(cx: &mut TetComplex, t: u32, a: u32, b: u32) -> Result<boo
     if cx.curve(a, b).is_some() || !vs.contains(&a) || !vs.contains(&b) {
         return Ok(false);
     }
+    // A removal that failed fails again until a tetrahedron around the edge changes.
+    if cx.edge_known_to_fail(a, b) {
+        return Ok(false);
+    }
+    let removed = remove_edge_ring(cx, t, a, b)?;
+    if !removed {
+        cx.mark_edge_failed(a, b);
+    }
+    Ok(removed)
+}
+
+/// [`remove_edge_at`] past its checks.
+fn remove_edge_ring(cx: &mut TetComplex, t: u32, a: u32, b: u32) -> Result<bool> {
     let Some(ring) = cx.edge_ring_at(t, a, b)? else { return Ok(false) };
     let m = ring.verts.len();
     if m < 3 || m > MAX_RING + usize::from(!ring.closed) {
         return Ok(false);
     }
-    let v = ring.verts.clone();
+    let mut v = ring.verts.clone();
+    if ring.closed {
+        // Start a closed ring at its smallest vertex, so the triangulation chosen does not
+        // depend on the tetrahedron the ring was walked from.
+        let first = v.iter().enumerate().min_by_key(|(_, id)| **id).map_or(0, |(i, _)| i);
+        v.rotate_left(first);
+    }
     let x = |id: u32| cx.xyz(id);
     let (xa, xb) = (x(a)?, x(b)?);
     // An open ring runs from boundary face (a, b, v_0) to (a, b, v_{m−1}): both must lie on one
@@ -150,7 +173,7 @@ pub fn remove_edge_at(cx: &mut TetComplex, t: u32, a: u32, b: u32) -> Result<boo
         Ok(measure::quality(&[pi, pj, pk, xa]).min(measure::quality(&[pi, pk, pj, xb])))
     };
     // Triangulate the polygon v_0 … v_{m−1}, closed by the edge v_{m−1} v_0.
-    let (best, arg) = klincsek(m, &mut q)?;
+    let (best, arg) = klincsek(m, before, &mut q)?;
     let total = best.get(m - 1).copied().unwrap_or(f64::NEG_INFINITY);
     if !(total > before) {
         return Ok(false);
@@ -199,37 +222,59 @@ pub fn remove_face(cx: &mut TetComplex, t: u32, k: usize) -> Result<bool> {
     let us = cx.tet(u)?;
     let face = face_toward(vs, k);
     let b = us.iter().copied().find(|v| !face.contains(v)).unwrap_or(NONE);
-    if b == NONE || cx.curve(a, b).is_some() || cx.edge_tet(a, b)?.is_some() {
+    if b == NONE || cx.curve(a, b).is_some() || cx.face_known_to_fail(a, b, face) || cx.edge_tet(a, b)?.is_some() {
         return Ok(false);
     }
+    let removed = remove_faces_between(cx, t, u, a, b, face)?;
+    if !removed {
+        cx.mark_face_failed(a, b, face);
+    }
+    Ok(removed)
+}
+
+/// [`remove_face`] past its checks: tetrahedra `t` (apex `a`) and `u` (apex `b`) share `face`.
+fn remove_faces_between(cx: &mut TetComplex, t: u32, u: u32, a: u32, b: u32, face: [u32; 3]) -> Result<bool> {
     // Sandwiched faces between a and b: faces f with tetrahedra (a ∪ f) and (b ∪ f). Grow the
     // set from the given face across shared edges while every new tetrahedron (a, b, e) on the
     // ring stays better than the worst removed one; take the best prefix found (a greedy form of
     // Shewchuk's optimal search, which visits the same candidates).
-    let mut faces: Vec<[u32; 3]> = vec![face];
+    // Each face with the tetrahedron (a ∪ face).
+    let mut faces: Vec<([u32; 3], u32)> = vec![(face, t)];
     let mut old: Vec<u32> = vec![t, u];
     let mut best: Option<(f64, Vec<u32>, Vec<[u32; 4]>)> = None;
+    let mut removed_q = worst(cx, &old)?;
+    let mut made: IdMap<(u32, u32), ([u32; 4], f64)> = IdMap::default();
     for _round in 0..8 {
-        let removed_q = worst(cx, &old)?;
         // The boundary edges of the face set (edges in exactly one face), oriented as in the face
-        // seen from a: each gives the new tetrahedron (a, b, e) positive.
-        let mut count: IdMap<(u32, u32), (u32, u32, usize)> = IdMap::default();
-        for f in &faces {
+        // seen from a, with the face's tetrahedron on a's side: each gives the new tetrahedron
+        // (a, b, e) positive.
+        let mut count: IdMap<(u32, u32), (u32, u32, u32, usize)> = IdMap::default();
+        for &(f, ta) in &faces {
             for i in 0..3 {
                 let (p, q) = (f[i], f[(i + 1) % 3]);
-                let e = count.entry(sorted2(p, q)).or_insert((p, q, 0));
-                e.2 += 1;
+                let e = count.entry(sorted2(p, q)).or_insert((p, q, ta, 0));
+                e.3 += 1;
             }
         }
-        let mut ring: Vec<(u32, u32)> = count.values().filter(|e| e.2 == 1).map(|e| (e.0, e.1)).collect();
+        let mut ring: Vec<(u32, u32, u32)> = count.values().filter(|e| e.3 == 1).map(|e| (e.0, e.1, e.2)).collect();
         ring.sort_unstable();
         let mut new = Vec::with_capacity(ring.len());
         let mut q = f64::INFINITY;
-        for &(p, r) in &ring {
-            // face (p, r, x) has a on its positive side, so (p, r, a, b)… orient explicitly.
-            let cand = [p, r, b, a];
-            let cand = if cx.orient(cand)? == Sign::Positive { cand } else { [r, p, b, a] };
-            q = q.min(tet_quality(cx, cand)?);
+        for &(p, r, _) in &ring {
+            // A ring edge stays on the ring until a face grows across it: its tetrahedron is
+            // worked out once.
+            let (cand, cq) = match made.get(&(p, r)) {
+                Some(&c) => c,
+                None => {
+                    // face (p, r, x) has a on its positive side, so (p, r, a, b)… orient explicitly.
+                    let cand = [p, r, b, a];
+                    let cand = if cx.orient(cand)? == Sign::Positive { cand } else { [r, p, b, a] };
+                    let c = (cand, tet_quality(cx, cand)?);
+                    made.insert((p, r), c);
+                    c
+                }
+            };
+            q = q.min(cq);
             new.push(cand);
         }
         if q > removed_q && best.as_ref().is_none_or(|(bq, _, _)| q > *bq) {
@@ -237,11 +282,12 @@ pub fn remove_face(cx: &mut TetComplex, t: u32, k: usize) -> Result<bool> {
         }
         // Grow: a sandwiched neighbour face across a ring edge.
         let mut grown = false;
-        for &(p, r) in &ring {
-            if let Some((f, ta, tb)) = sandwiched_across(cx, a, b, p, r, &faces)? {
-                faces.push(f);
-                old.push(ta);
-                old.push(tb);
+        for &(p, r, ta) in &ring {
+            if let Some((f, na, nb)) = sandwiched_across(cx, a, b, p, r, ta, &faces)? {
+                faces.push((f, na));
+                old.push(na);
+                old.push(nb);
+                removed_q = removed_q.min(worst(cx, &[na, nb])?);
                 grown = true;
                 break;
             }
@@ -257,27 +303,28 @@ pub fn remove_face(cx: &mut TetComplex, t: u32, k: usize) -> Result<bool> {
 
 /// A face `(p, r, x)` sandwiched between `a` and `b` (tetrahedra `a ∪ f` and `b ∪ f` both exist)
 /// next to edge `pr`, not already in `faces`.
-fn sandwiched_across(cx: &mut TetComplex, a: u32, b: u32, p: u32, r: u32, faces: &[[u32; 3]]) -> Result<Option<([u32; 3], u32, u32)>> {
-    let Some(ring) = cx.edge_ring(p, r)? else { return Ok(None) };
-    // Tetrahedra around pr containing a, and containing b.
-    for &ta in &ring.tets {
-        let va = cx.tet(ta)?;
-        if !va.contains(&a) {
-            continue;
-        }
-        let x = va.iter().copied().find(|&v| v != a && v != p && v != r).unwrap_or(NONE);
-        if x == NONE || x == b {
-            continue;
-        }
-        let f = [p, r, x];
-        if faces.iter().any(|g| sorted3(*g) == sorted3(f)) {
-            continue;
-        }
-        let k = va.iter().position(|&v| v == a).unwrap_or(0);
-        let tb = cx.adj(ta)?.get(k).copied().unwrap_or(NONE);
-        if tb != NONE && cx.tet(tb)?.contains(&b) {
-            return Ok(Some((f, ta, tb)));
-        }
+fn sandwiched_across(cx: &TetComplex, a: u32, b: u32, p: u32, r: u32, ta: u32, faces: &[([u32; 3], u32)]) -> Result<Option<([u32; 3], u32, u32)>> {
+    // ta = (a, p, r, y) holds the face set's face on edge pr; the other tetrahedron of a around
+    // pr in a face set's neighbourhood lies across its face (a, p, r).
+    let va = cx.tet(ta)?;
+    let Some(ky) = va.iter().position(|&v| v != a && v != p && v != r) else { return Ok(None) };
+    let n = cx.adj(ta)?.get(ky).copied().unwrap_or(NONE);
+    if n == NONE {
+        return Ok(None);
+    }
+    let vn = cx.tet(n)?;
+    let x = vn.iter().copied().find(|&v| v != a && v != p && v != r).unwrap_or(NONE);
+    if x == NONE || x == b || !vn.contains(&a) {
+        return Ok(None);
+    }
+    let f = [p, r, x];
+    if faces.iter().any(|(g, _)| sorted3(*g) == sorted3(f)) {
+        return Ok(None);
+    }
+    let Some(k) = vn.iter().position(|&v| v == a) else { return Ok(None) };
+    let tb = cx.adj(n)?.get(k).copied().unwrap_or(NONE);
+    if tb != NONE && cx.tet(tb)?.contains(&b) {
+        return Ok(Some((f, n, tb)));
     }
     Ok(None)
 }
