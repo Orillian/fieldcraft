@@ -534,11 +534,34 @@ impl Reduction {
             });
             // A tie whose secondary node is held already: what is left of the row must be a
             // constraint of its own, not the difference of two near copies of one.
-            if row.source == Source::Tie
-                && intended.is_none()
-                && let Some(&(_, c)) = largest
-                && c.abs() < NEARLY_REPEATED * gross
-            {
+            let nearly_repeated = row.source == Source::Tie && intended.is_none() && largest.is_some_and(|t| t.1.abs() < NEARLY_REPEATED * gross);
+            // Held by a prescribed value (the secondary surface meeting a boundary condition or an
+            // axis-aligned symmetry plane: a crosspoint), the row can only constrain main degrees
+            // of freedom, and nearly repeated, what it adds is the mortar condition of a node
+            // whose motion is already given: its weights on main nodes off the boundary do not
+            // vanish (the dual basis spreads over the node's faces), so after the substitutions
+            // a small but real constraint is left, not round-off (1.3e-6 of the coefficients that
+            // cancelled to give it where a tet face meets a symmetry plane, #540; round-off would
+            // be ~1e-14 there). Eliminating it divides by that smallness; dropping it leaves the
+            // tie off by that fraction at the crosspoint, below the discretization error. So it
+            // is dropped, with the same threshold that calls it a near repeat. A secondary degree
+            // of freedom another constraint already eliminated (a node secondary in two ties, a
+            // tie and a coupling) is a real conflict and still refused (#389).
+            if nearly_repeated && state.get(row.pivot) == Some(&State::Fixed) {
+                // Still consistent with the prescribed values, or a contradiction.
+                let value = |t: &(usize, f64)| t.1 * values.get(t.0).copied().unwrap_or(0.0);
+                let residual: f64 = terms.iter().filter(|t| state.get(t.0) == Some(&State::Fixed)).map(value).sum();
+                let size: f64 = terms.iter().map(|t| value(t).abs()).sum();
+                if residual.abs() > 1e-9 * size.max(f64::MIN_POSITIVE) && residual.abs() > 0.0 {
+                    return Err(Error::Invalid(format!(
+                        "{} `{}` contradicts the prescribed values (boundary conditions or couplings hold its nodes in a way it cannot follow)",
+                        row.source.what(),
+                        row.coupling
+                    )));
+                }
+                continue;
+            }
+            if nearly_repeated {
                 let mut others: Vec<String> = row
                     .terms
                     .iter()
@@ -857,6 +880,48 @@ impl Reduction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tie(terms: Vec<(usize, f64)>, pivot: usize) -> Row<'static> {
+        Row { terms, pivot, coupling: "glue", source: Source::Tie }
+    }
+
+    /// Dofs `held` prescribed, dof 1 at `one` and the others at 0.
+    fn reduce(rows: &[Row], held: &[usize], one: f64) -> Result<Reduction> {
+        let layout = DofLayout::uniform(0..2, DofSet::TRANSLATIONS);
+        let budget = Budget { max_bytes: usize::MAX, pattern_entries: 0, matrices: 1 };
+        Reduction::new(
+            &layout,
+            std::iter::empty(),
+            &[0, 1],
+            rows,
+            |active| Ok((0..active.len()).map(|d| held.contains(&d).then_some(if d == 1 { one } else { 0.0 })).collect()),
+            budget,
+        )
+    }
+
+    /// A tie row of a secondary degree of freedom held by a boundary condition (dof 1), which
+    /// after substituting an earlier tie row (dof 0 following dofs 2 and 3) nearly repeats it, is
+    /// dropped (a crosspoint); dof 3 stays free.
+    #[test]
+    fn a_tie_row_on_a_held_degree_of_freedom_is_dropped() {
+        let rows = [tie(vec![(0, 1.0), (2, -0.5), (3, -0.5)], 0), tie(vec![(1, 1.0), (0, -1.0), (2, 0.5), (3, 0.5 - 1e-7)], 1)];
+        let r = reduce(&rows, &[1, 2], 0.0).unwrap();
+        assert_eq!(r.neq(), 3, "dofs 3, 4, 5 free");
+    }
+
+    /// Nearly repeated but inconsistent: on a secondary degree of freedom another tie already
+    /// eliminated (a node secondary in two ties) it is refused (#389), and on a held one whose
+    /// prescribed values it contradicts too.
+    #[test]
+    fn a_near_repeat_on_an_eliminated_degree_of_freedom_is_refused() {
+        let rows = [tie(vec![(0, 1.0), (2, -0.5), (3, -0.5)], 0), tie(vec![(0, 1.0), (2, -0.5), (3, -0.5 - 1e-7)], 0)];
+        let e = reduce(&rows, &[2], 0.0).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(e.contains("almost alike"), "{e}");
+        // Dof 1 held at 1 and dof 2 at 0 while the row says dof 1 follows them.
+        let rows = [tie(vec![(0, 1.0), (2, -0.5), (3, -0.5)], 0), tie(vec![(1, 1.0), (0, -1.0), (2, 0.5), (3, 0.5 - 1e-7)], 1)];
+        let e = reduce(&rows, &[1, 2], 1.0).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(e.contains("contradicts"), "{e}");
+    }
 
     #[test]
     fn reduced_matrix_budget_refuses_byte_counts_that_overflow() {
