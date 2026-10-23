@@ -130,6 +130,8 @@ pub struct ThermalSetup {
     pub magic: f64,
     /// The fluid's thermal diffusivity k / (ρ c), model units.
     pub diffusivity: f64,
+    /// The fluid's specific heat, in J/(kg K), when the solve was prepared.
+    pub specific_heat: f64,
     pub initial_temperature: f64,
     /// The temperature, in kelvin, the lattice's 0 stands for (see above).
     pub zero: f64,
@@ -781,6 +783,7 @@ impl Setup {
                     }
                 };
                 Some(ThermalSetup {
+                    specific_heat: c,
                     tau,
                     magic: thermal_magic(tau),
                     diffusivity,

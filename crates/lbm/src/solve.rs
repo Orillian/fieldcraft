@@ -160,6 +160,8 @@ pub struct FluidStats {
 /// The result of a fluid step.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FluidResult {
+    /// Material properties when solved, for open-face transport.
+    pub port_properties: Option<crate::PortProperties>,
     pub step: String,
     pub grid: Grid,
     /// Per cell: not fluid (inside an obstacle).
@@ -590,6 +592,7 @@ fn run_checkpointed(
         })
         .collect();
     Ok(FluidResult {
+        port_properties: Some(crate::PortProperties { density: setup.density, specific_heat: setup.thermal.as_ref().map(|t| t.specific_heat) }),
         step: setup.step.clone(),
         grid: setup.grid,
         solid,

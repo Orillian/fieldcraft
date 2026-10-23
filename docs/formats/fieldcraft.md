@@ -147,7 +147,7 @@ results without solving again (`results.contour`, `results.frame`, `results.slic
 `results.streamlines`, `solve.probe` and the rest work at once). Little-endian:
 
 ```
-"MCRSLT03"                     magic (the results encoding's version is 03)
+"MCRSLT04"                     magic (the results encoding's version is 04)
 u32 steps
 steps × { u64 length, step name (UTF-8),
           32 bytes: SHA-256 of the definition it was solved from,
@@ -169,6 +169,10 @@ an optional value and before each field of a structure, a `u32` before a variant
 follows the order of the solvers' result types, so it has a version of its own in the magic: a
 change to those types is a new version. A file whose results are of another version opens without
 them, with a warning to solve again: results are what solving gives again, the definition is not.
+Fluid results include their solve-time density and optional specific heat as regular fields.
+Port mass and sensible-heat transport therefore use the properties of the saved run even if the
+model's material is edited later. Version 04 adds these fields; earlier results encodings open
+without results and keep the model definition.
 
 The definition hash is the SHA-256 of what solving the step reads (the mesh, the definitions the
 step uses and the step itself, as their JSON) and of the hashes of the geometry files the model is

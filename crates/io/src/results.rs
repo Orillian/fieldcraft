@@ -5,7 +5,7 @@
 //! Little-endian:
 //!
 //! ```text
-//! "MCRSLT03"                     magic, 8 bytes (the results encoding's version is 03)
+//! "MCRSLT04"                     magic, 8 bytes (the results encoding's version is 04)
 //! u32 steps
 //! steps × { u64 length, step name (UTF-8),
 //!           32 bytes: SHA-256 of the definition it was solved from ([`definition_hash`]),
@@ -39,8 +39,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{Error, Geometry, MAX_FILE_BYTES, Result, codec, invalid};
 
-/// The magic bytes the part starts with (the `03` is the results encoding's version).
-pub const MAGIC: &[u8; 8] = b"MCRSLT03";
+/// The magic bytes the part starts with (the `04` is the results encoding's version).
+pub const MAGIC: &[u8; 8] = b"MCRSLT04";
 
 /// The part's name.
 pub const PART: &str = "results.bin";
@@ -393,6 +393,11 @@ pub fn check(r: &Solved) -> std::result::Result<(), String> {
 }
 
 fn check_fluid(f: &FluidResult) -> std::result::Result<(), String> {
+    if f.port_properties
+        .is_some_and(|p| !(p.density > 0.0 && p.density.is_finite()) || p.specific_heat.is_some_and(|cp| !(cp > 0.0 && cp.is_finite())))
+    {
+        return Err("its port properties need a finite positive density and specific heat".into());
+    }
     let g = &f.grid;
     if !(g.spacing.is_finite() && g.spacing > 0.0) || g.origin.iter().any(|x| !x.is_finite()) {
         return Err("its grid has no finite origin and positive spacing".into());

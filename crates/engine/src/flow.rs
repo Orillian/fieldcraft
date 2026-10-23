@@ -617,6 +617,7 @@ pub(crate) mod tests {
             frozen: None,
         };
         FluidResult {
+            port_properties: None,
             step: "Flow".into(),
             grid,
             solid,
