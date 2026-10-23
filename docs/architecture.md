@@ -405,6 +405,10 @@ module docs and in `docs/solvers/literature.md` (Part I).
    point-implicitly, which keeps the coupling stable for any heat capacity. A run to steady state scales the solids' heat capacity
    down to the smallest the lattice allows (the steady temperatures do not depend on it). The
    GPU backend steps the conducting cells too (single precision, checked against the CPU).
+   Fan and porous zones also run on the device: the same implicit half-force velocity,
+   curve feedback before each collision, and optional zone flow/pressure histories. Zone
+   ownership, headers, curves and the fans' cell lists follow the flags in their buffer,
+   keeping the storage binding count ([GPU](manual/fluid/gpu.md)).
 5. **Results.** Frames of velocity, gauge pressure and (with heat) temperature per cell (single
    precision), force and heat histories per wall and the fluid mass, in model units, stored
    per step like the implicit results. Each conducting solid's peak temperature is read from

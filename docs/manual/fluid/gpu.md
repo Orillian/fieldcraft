@@ -110,7 +110,7 @@ whose forces are read back (a submission's last). The temperature lattice is two
 | Conducting solids, thermal contacts, solid power | yes |
 | Smagorinsky's model, the wall model (`wall_model: "musker"`), Van Driest damping (`van_driest`) | yes |
 | Steady-state rule and averaging | yes (decided on the host from read-back fields) |
-| Fans and porous zones | no: refused with the zone's name, solve on the CPU |
+| Fans and porous zones (curves, Darcy–Forchheimer, loss coefficients), with every collision and wall treatment | yes |
 | The halfway wall-function bounce (`wall_model: "spalding_bounce_halfway"`) | yes |
 | Han et al.'s on-node wall-function bounce (`wall_model: "spalding_bounce"`, their eq. 14) | yes |
 
@@ -118,7 +118,8 @@ whose forces are read back (a submission's last). The temperature lattice is two
 
 1. **Preparation on the CPU** (`Flow::new`): voxelisation, links, open cells, conducting cells, the
    initial state. A flow handed to the GPU never allocates the CPU's streaming targets.
-2. **Refusals**: fans and porous zones; a policy that finds no device; an
+2. **Refusals**: a fan curve or resistance that single precision cannot hold (by the zone's
+   name); a policy that finds no device; an
    adapter that allows fewer storage buffers per compute stage than the shader needs (the message
    names the graphics backend and suggests Vulkan, Metal or DX12, or the CPU).
 3. **Memory**: before preparation, the population buffer is checked against the device's limit per
@@ -351,8 +352,12 @@ t = 20) on the GB10 gives the CPU's peak dissipation to the digits printed, at t
 | `hrr@0.99:v0.18` (σ 0.99, Vreman 0.18) | 0.01129 (8.39) | 0.01162 (8.39) |
 | `hrr@dynamic:v0.18` (dynamic σ, Vreman 0.18) | 0.01352 (5.88) | 0.01357 (5.88) |
 
-Fans and porous zones (`fans_and_porous_zones_are_refused_clearly`) are refused with a message
-naming the CPU. Tests skip
+Fans and porous zones (`tests/verification/zones.rs`) follow the CPU with feedback on the first
+steps, independent of chunks and read-backs, on all six fan directions, overlapping zones, strong
+Darcy terms, heat, buoyancy and a powered conductor, and with the wall model, the halfway and the
+on-node wall-function bounces (`fans_and_porous_zones_with_every_wall_treatment_follow_the_cpu`:
+velocity within 1.1e-6 of the largest speed, zone flow and fan rise within 5e-7, on an M4 Max).
+Tests skip
 without a GPU adapter unless `FIELDCRAFT_REQUIRE_GPU=1`, which makes a missing adapter a failure.
 CI has no hardware GPU and runs the suite on lavapipe.
 
@@ -404,11 +409,28 @@ neighbours' velocities; Vreman's model and dynamic σ add arithmetic only.
 
 ![Throughput of the two streaming layouts](../../media/manual/gpu-2.svg)
 
+**Fans and porous zones.** Each zone cell's velocity is the CPU's implicit half-force one (Guo and
+Zhao 2002), its root scaled so a strong Darcy term does not overflow single precision. Before every
+collision `fan_partials` sums the axial velocity over each fan's cells, one workgroup per 256 cells
+of its cell list, and `fan_update` adds a fan's workgroups in order and moves its rise toward its
+curve, so the feedback runs every lattice step on the device with no read-back. The zones live in
+the flag buffer after the flags, in fields of their own (each cell's zone, the headers, the curves,
+the fans' cell lists), so no kernel binds another buffer; only `fan_update` writes it, through a
+second binding no other kernel takes, and every other kernel reads it read-only. `zone_samples`
+reads a zone's flow, pressure difference and fan rise back only when a history or the reply asks
+(16 bytes per zone). Periodic 64³, two relaxation times, in place, 200 steps after 32, M4 Max,
+Metal, million cell updates per second (`zone_throughput_and_diagnostic_cost`):
+
+| zones | updates per second |
+|---|---|
+| none | 1352 |
+| a porous vent across the box | 1297 |
+| a fan across the box, and the vent | 1181 |
+
 ## Limitations
 
 - Single precision: results agree with the CPU within the stated tolerances and
   are deterministic per device only.
-- Fans and porous zones run on the CPU only.
 - An instability is noticed at the end of a chunk of up to 64 steps.
 - A run shorter than 10 000 steps advances one step per submission (its force history samples
   every step), far below the throughput of the Performance table.

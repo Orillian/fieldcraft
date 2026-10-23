@@ -11,7 +11,7 @@ body forces.
 |---|---|
 | **Commands** | `model.fluid_domain.create` / `.edit` (`porous`, `fans`), `solve.fluid` |
 | **Step procedure** | `"fluid"` on a domain with `porous` or `fans` |
-| **Solver** | `crates/lbm` (CPU, f64). The GPU backend refuses fans and porous zones. |
+| **Solver** | `crates/lbm` (CPU, f64); the GPU backend (`crates/lbm-gpu`, f32) steps them too, within the tolerances [GPU](gpu.md) states. |
 | **Method** | Darcy–Forchheimer resistance through Guo's forcing with the implicit velocity of Guo & Zhao (2002); fan curve with an under-relaxed pressure rise |
 | **Verified by** | `crates/lbm/tests/zones.rs`; `a_fan_drives_a_duct_through_a_grille_and_the_reply_reports_the_operating_point` (`crates/engine/src/cmd/solve.rs`) |
 
@@ -223,12 +223,16 @@ profile), and the mass changes by less than 1e-10. Hostile curves, directions, r
 names and resistances are refused and leave the model as it was
 (`a_fan_drives_a_duct_through_a_grille_and_the_reply_reports_the_operating_point`).
 
-**GPU.** The backend refuses fans and porous zones by name, before it looks for a device
-(`fans_and_porous_zones_are_refused_clearly`).
+**GPU** (`crates/lbm-gpu/tests/verification/zones.rs`, every collision and both layouts): the
+fields, flows, pressures and fan rises follow the CPU from the first steps, independent of how the
+steps are chunked and read back; the strong-resistance velocity is the implicit closed form; the
+porous drops match the laws above within 0.5 % and the fan's operating point within 0.5 % in flow and 1 % in rise (heavy job); and with
+the wall model and both wall-function bounces the fields stay within 1e-4 of the largest speed. A
+curve or a resistance that single precision cannot hold is refused by the zone's name, before a
+device is opened.
 
 ## Limitations
 
-- CPU only: the GPU backend refuses a domain with fans or porous zones.
 - Zones are axis-aligned boxes of whole cells.
 - A porous zone's resistance is isotropic (the same law in every direction); `axis` sets only the
   loss coefficient's thickness and the reported direction.
