@@ -72,6 +72,14 @@ const DEVICE_DAMPING: u64 = 2 * 2 * F32;
 /// Per cell of the GPU backend's population buffer (one buffer, single precision).
 pub const DEVICE_POPULATIONS: u64 = Q as u64 * F32;
 
+/// Words in a GPU fan/porous header, appended to its flags buffer (lbm-gpu/zones.rs).
+pub const DEVICE_ZONE_WORDS: usize = 20;
+/// Per cell with fans or porous zones, in the GPU flags buffer: its zone, and at most one entry
+/// in a fan's cell list (lbm-gpu/zones.rs).
+const DEVICE_ZONE_CELL: u64 = 2 * F32;
+/// The most padding words of one fan's cell list (a workgroup, less one).
+const DEVICE_FAN_PADDING: u64 = 256;
+
 /// The fewest bytes a cell takes on the host (a GPU run of a flow without heat while it is
 /// prepared): what bounds the cells a machine's memory can hold.
 pub const MIN_BYTES_PER_CELL: u64 = POPULATIONS + FLAGS + DEVICE_STAGING;
@@ -117,6 +125,8 @@ struct Shape {
     gradients: bool,
     wall_model: bool,
     zones: bool,
+    zone_data: u64,
+    zone_count: u64,
     conducting: bool,
     open_faces: [bool; 6],
 }
@@ -137,6 +147,12 @@ impl Shape {
             wall_model,
             gradients,
             zones: !domain.fans.is_empty() || !domain.porous.is_empty(),
+            zone_count: (domain.fans.len() + domain.porous.len()) as u64,
+            // Headers, curves, and per fan its table entry, its list's padding and its slots of
+            // the partial sums.
+            zone_data: ((domain.fans.len() + domain.porous.len()) as u64 * DEVICE_ZONE_WORDS as u64
+                + domain.fans.iter().map(|f| 2 * f.curve.len() as u64 + 2 + DEVICE_FAN_PADDING).sum::<u64>())
+                * F32,
             conducting: thermal.is_some_and(|t| !t.solids.is_empty()),
             open_faces: fieldcraft_model::BoxFace::ALL.map(|f| is_open(domain.faces.get(f))),
         })
@@ -204,7 +220,8 @@ impl Memory {
             flow += INDEX;
         }
         if s.zones {
-            flow += INDEX;
+            // Both ownership per cell and the zones' lists of owned fluid cells.
+            flow += 2 * INDEX;
         }
         // The CPU's gradient velocities are allocated with the flow (none on the host for the GPU).
         let gradients = if s.gradients { GRADIENT_VELOCITY } else { 0 };
@@ -212,6 +229,7 @@ impl Memory {
             flow += INDEX;
         }
         let prepared = per_cell(flow).saturating_add(boundary);
+        let zone_cells = if s.zones { per_cell(DEVICE_ZONE_CELL) } else { 0 };
         let (setup, state, readback) = match backend {
             // The CPU flow allocates its streaming targets on the first step and keeps
             // everything to the end.
@@ -221,9 +239,12 @@ impl Memory {
             }
             // The device backend copies the flow up, and the flow is dropped before the steps.
             Choice::Device => (
-                prepared.saturating_add(per_cell(DEVICE_STAGING + if s.damping { DEVICE_DAMPING } else { 0 })),
-                per_cell(2 * RESULT),
-                per_cell(READBACK + DEVICE_READBACK + if s.heat { READBACK_HEAT + DEVICE_READBACK_HEAT } else { 0 }),
+                prepared
+                    .saturating_add(per_cell(DEVICE_STAGING + if s.damping { DEVICE_DAMPING } else { 0 }))
+                    .saturating_add(s.zone_data.saturating_add(zone_cells).saturating_mul(3)),
+                per_cell(2 * RESULT).saturating_add(s.zone_data).saturating_add(zone_cells),
+                per_cell(READBACK + DEVICE_READBACK + if s.heat { READBACK_HEAT + DEVICE_READBACK_HEAT } else { 0 })
+                    .saturating_add(s.zone_count.saturating_mul(4 * F32)),
             ),
         };
         let device = (backend == Choice::Device)

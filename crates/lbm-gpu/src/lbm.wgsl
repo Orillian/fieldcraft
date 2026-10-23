@@ -104,6 +104,8 @@ override HRR: bool = false;
 override VREMAN: bool = false;
 // The hybrid collision's dynamic σ from the subgrid model's eddy viscosity (with HRR); likewise.
 override DYNAMIC: bool = false;
+// Fans and porous zones (fieldcraft_lbm::flow's zone actions, data in `fluid`: zones.rs); likewise.
+override ZONES: bool = false;
 // The largest lattice speed (fieldcraft_lbm::setup::MAX_LATTICE_SPEED): the cap of a convective
 // outlet's convection speed.
 override MAX_SPEED: f32 = 0.5;
@@ -141,7 +143,8 @@ struct Params {
     // The scalar lattice: its antisymmetric relaxation rate 1/τ_T⁻ (x), T₀ (y), whether there
     // is heat (z), its symmetric relaxation rate 1/τ_T⁺ (w).
     therm: vec4<f32>,
-    // Current AA orientation (x: 0 normal, 1 opposite directions at upstream neighbours).
+    // Current AA orientation (x); with fans and porous zones (ZONES) their number (y), the fans'
+    // number (z) and the first word of the fan table in `fluid` (w; zones.rs).
     phase: vec4<u32>,
     // Conducting solids: cells m (x), interface links k (y), padding (z), and 1 / sub-steps (w,
     // as f32 bits).
@@ -165,6 +168,11 @@ struct Params {
 // shader), so no kernel binds more storage buffers than WebGPU's default of 8 per stage; all of
 // them in one layout would need 22, more than GL allows (16, #640).
 @group(0) @binding(0) var<uniform> params: Params;
+// Per cell its flag word (native.rs); with fans and porous zones (ZONES) then each cell's zone
+// plus one, the zones' 20-word headers, the fans' curves, the fan table and the fans' cell lists
+// (zones.rs). Read-only here, so a value loaded at a uniform index is uniform: only `fan_update`
+// writes a fan's rise, through `zones_rw`, which is the same buffer and which no other kernel
+// binds.
 @group(0) @binding(1) var<storage, read> fluid: array<u32>;
 @group(0) @binding(2) var<storage, read_write> f: array<f32>;
 @group(0) @binding(3) var<storage, read_write> g: array<f32>;
@@ -224,6 +232,8 @@ struct Params {
 // (velocity[a n + cell]), written by `gradient_velocity` for the finite-difference gradient the
 // collision takes of its neighbours (12 bytes per cell).
 @group(0) @binding(25) var<storage, read_write> velocity: array<f32>;
+// The flags buffer (`fluid`), writable, for `fan_update` alone.
+@group(0) @binding(26) var<storage, read_write> zones_rw: array<u32>;
 
 var<workgroup> red: array<vec4<f32>, 256>;
 // The largest squared speed of a workgroup's cells (collide): one atomic per workgroup, not
@@ -294,7 +304,44 @@ fn acc_of(cell: u32) -> vec3<f32> {
 }
 
 fn forced() -> bool {
-    return params.acc.w > 0.5 || params.buoy.w > 0.5;
+    return params.acc.w > 0.5 || params.buoy.w > 0.5 || ZONES;
+}
+
+// Guo & Zhao (2002), as on the CPU: solve the implicit half-force porous velocity.
+// Fan rise is a force per volume; porous resistance is an acceleration times density.
+struct ZoneMotion { u: vec3<f32>, force: vec3<f32> }
+const ZONE_WORDS: u32 = 20u;
+// The header of zone z, after the flags and the cells' zones.
+fn zone_base(z: u32) -> u32 { return 2u * params.n + ZONE_WORDS * z; }
+fn zone_float(b: u32, k: u32) -> f32 { return bitcast<f32>(fluid[b + k]); }
+// Every velocity the CPU takes from `velocity_force` (the collision, the moments, the wall
+// samples, the gradient's velocities) comes from here, so a zone cell next to a wall or in the
+// gradient's stencil sees its zone as on the CPU.
+fn zone_motion(cell: u32, rho: f32, j: vec3<f32>) -> ZoneMotion {
+    var force = rho * acc_of(cell);
+    if !ZONES { return ZoneMotion((j + 0.5 * force) / rho, force); }
+    let z = fluid[params.n + cell];
+    if z == 0u { return ZoneMotion((j + 0.5 * force) / rho, force); }
+    let b = zone_base(z - 1u);
+    let alpha = zone_float(b, 8u);
+    let beta = zone_float(b, 9u);
+    if fluid[b] == 1u {
+        let axis = fluid[b + 1u];
+        force[axis] = force[axis] + zone_float(b, 10u) * zone_float(b, 12u) / f32(fluid[b + 15u]);
+    }
+    let v = (j + 0.5 * force) / rho;
+    if alpha == 0.0 && beta == 0.0 { return ZoneMotion(v, force); }
+    let c0 = 0.5 * (1.0 + 0.5 * alpha);
+    let speed = length(v);
+    // Scale the root: c0*c0 can overflow f32 for a strong, still representable Darcy term.
+    let term = sqrt(0.5 * beta) * sqrt(speed);
+    let norm = max(c0, term);
+    let c = c0 / norm;
+    let s = term / norm;
+    let scale = (1.0 / norm) / (c + sqrt(c*c + s*s));
+    let u = v * scale;
+    force = force - rho * (alpha * u + (beta * speed * scale) * u);
+    return ZoneMotion(u, force);
 }
 
 // The scalar equilibrium w_q T (1 + 4 c_q·u), shifted by w_q T₀ like the populations.
@@ -552,7 +599,8 @@ fn bounce_sample(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_i
     let rho = 1.0 + drho;
     var stress = vec3<f32>(0.0);
     if rho > 0.0 && rho < 1e30 {
-        let u = (j + 0.5 * rho * acc_of(cell)) / rho;
+        var u = (j + 0.5 * rho * acc_of(cell)) / rho;
+        if ZONES { u = zone_motion(cell, rho, j).u; }
         let rel = u - b.xyz;
         let t = rel - dot(rel, a.xyz) * a.xyz;
         let speed = length(t);
@@ -728,7 +776,8 @@ fn damping_refresh(@builtin(local_invocation_index) lid: u32, @builtin(workgroup
     let rho = 1.0 + drho;
     var ut = 0.0;
     if rho > 0.0 && rho < 1e30 {
-        let rel = (j + 0.5 * rho * acc_of(cell)) / rho - wall;
+        var rel = (j + 0.5 * rho * acc_of(cell)) / rho - wall;
+        if ZONES { rel = zone_motion(cell, rho, j).u - wall; }
         ut = spalding_friction(length(rel - dot(rel, normal) * normal), y, params.smag.w);
     }
     damping[k] = ut;
@@ -793,7 +842,8 @@ fn wall_sample(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id)
     let nu = params.smag.w;
     var out = vec4<f32>(b.xyz, 1.0 / (3.0 * nu + 0.5));
     if rho > 0.0 && rho < 1e30 {
-        let u2 = (j + 0.5 * rho * acc_of(second)) / rho;
+        var u2 = (j + 0.5 * rho * acc_of(second)) / rho;
+        if ZONES { u2 = zone_motion(second, rho, j).u; }
         let rel = u2 - b.xyz;
         let t = rel - dot(rel, a.xyz) * a.xyz;
         let speed = length(t);
@@ -922,6 +972,7 @@ fn gradient_velocity(@builtin(local_invocation_index) lid: u32, @builtin(workgro
         if rho > 0.0 && rho == rho && abs(rho) <= 1e30 {
             let force = rho * acc_of(cell);
             u = (j + 0.5 * force) / rho;
+            if ZONES { u = zone_motion(cell, rho, j).u; }
         }
     }
     let n = params.n;
@@ -1068,8 +1119,13 @@ fn collide_cell(cell: u32, lid: u32) {
         return;
     }
     let a = acc_of(cell);
-    let force = rho * a;
-    let u = (j + 0.5 * force) / rho;
+    var force = rho * a;
+    var u = (j + 0.5 * force) / rho;
+    if ZONES {
+        let motion = zone_motion(cell, rho, j);
+        force = motion.force;
+        u = motion.u;
+    }
     let uu = dot(u, u);
     speed[lid] = uu;
     if has_heat() { moments[cell] = vec4<f32>(u, rho); }
@@ -1897,7 +1953,8 @@ fn cell_moments(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id
         j = j + vec3<f32>(c_of(q)) * v;
     }
     let rho = 1.0 + drho;
-    let u = (j + 0.5 * rho * acc_of(cell)) / rho;
+    var u = (j + 0.5 * rho * acc_of(cell)) / rho;
+    if ZONES { u = zone_motion(cell, rho, j).u; }
     moments[cell] = vec4<f32>(u, rho);
 }
 
@@ -1912,6 +1969,162 @@ fn wall_moments(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id
     let k = fluid[cell] >> 1u;
     if k == 0u { return; }
     moments[cell] = vec4<f32>(walls[4u * (k - 1u) + 2u].xyz, moments[cell].w);
+}
+
+// A fixed tree within one workgroup. The final barrier also protects the next use of red.
+fn zone_reduce(lid: u32, v: vec4<f32>) -> vec4<f32> {
+    red[lid] = v;
+    workgroupBarrier();
+    for (var k = 128u; k > 0u; k = k >> 1u) {
+        if lid < k { red[lid] = red[lid] + red[lid + k]; }
+        workgroupBarrier();
+    }
+    let total = red[0];
+    workgroupBarrier();
+    return total;
+}
+
+fn zone_lo(b: u32) -> vec3<u32> { return vec3<u32>(fluid[b+2u], fluid[b+3u], fluid[b+4u]); }
+fn zone_hi(b: u32) -> vec3<u32> { return vec3<u32>(fluid[b+5u], fluid[b+6u], fluid[b+7u]); }
+fn zone_cell(lo: vec3<u32>, extent: vec3<u32>, k: u32) -> u32 {
+    let xyz = lo + vec3<u32>(k % extent.x, (k / extent.x) % extent.y, k / (extent.x * extent.y));
+    return xyz.x + params.nx * (xyz.y + params.ny * xyz.z);
+}
+
+// Before every collision, as the CPU's `refresh_fans`: each fan's flow from the populations
+// with its previous push. `fan_partials` sums the axial velocity of the fans' cells, one
+// workgroup per 256 entries of their padded cell lists (each workgroup within one fan), into
+// `partials`; `fan_update` then adds each fan's workgroups in order and moves its rise toward
+// its curve. Fixed sums in a fixed order: deterministic on a device.
+@compute @workgroup_size(256)
+fn fan_partials(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+    let group = wg.y * params.groups_x + wg.x;
+    let lists = params.phase.w + params.phase.z;
+    // The lists end the buffer; a dispatch of several rows has workgroups past them. A uniform
+    // test (the workgroup's index and the buffer's length), so the barriers below stay uniform.
+    if (group + 1u) * WG > arrayLength(&fluid) - lists { return; }
+    let cell = fluid[lists + group * WG + lid];
+    var flow = 0.0;
+    if cell != 0xffffffffu {
+        let b = zone_base(fluid[params.n + cell] - 1u);
+        var drho = 0.0;
+        var j = vec3<f32>(0.0);
+        let xyz = aa_coords(cell);
+        for (var q = 0u; q < Q; q = q + 1u) {
+            let v = population(q, cell, xyz);
+            drho = drho + v;
+            j = j + vec3<f32>(c_of(q)) * v;
+        }
+        let rho = 1.0 + drho;
+        if rho > 0.0 && rho < 1e30 { flow = zone_motion(cell, rho, j).u[fluid[b + 1u]]; }
+    }
+    let total = zone_reduce(lid, vec4<f32>(flow, 0.0, 0.0, 0.0)).x;
+    if lid == 0u { partials[group] = total; }
+}
+
+fn fan_target(b: u32, flow: f32) -> f32 {
+    let first = zones_rw[b + 13u];
+    let count = zones_rw[b + 14u];
+    if count == 0u { return 0.0; }
+    let x0 = bitcast<f32>(zones_rw[first]);
+    let y0 = bitcast<f32>(zones_rw[first + 1u]);
+    if !(flow > x0) { return y0; }
+    var previous = vec2<f32>(x0, y0);
+    for (var k = 1u; k < count; k = k + 1u) {
+        let point = vec2<f32>(bitcast<f32>(zones_rw[first + 2u*k]), bitcast<f32>(zones_rw[first + 2u*k + 1u]));
+        if flow <= point.x {
+            return previous.y + (flow - previous.x) / (point.x - previous.x) * (point.y - previous.y);
+        }
+        previous = point;
+    }
+    return previous.y;
+}
+
+// One invocation per fan (the fan table's entry wg.x): no barrier, so its loads need not be
+// uniform.
+@compute @workgroup_size(1)
+fn fan_update(@builtin(workgroup_id) wg: vec3<u32>) {
+    if wg.x >= params.phase.z { return; }
+    let b = zone_base(zones_rw[params.phase.w + wg.x]);
+    let first = zones_rw[b + 16u];
+    var total = 0.0;
+    for (var k = 0u; k < zones_rw[b + 17u]; k = k + 1u) { total = total + partials[first + k]; }
+    let q = bitcast<f32>(zones_rw[b + 10u]) * total / f32(zones_rw[b + 15u]);
+    let old = bitcast<f32>(zones_rw[b + 12u]);
+    zones_rw[b + 12u] = bitcast<u32>(old + bitcast<f32>(zones_rw[b + 11u]) * (fan_target(b, q) - old));
+}
+
+// Density deviation and count over one footprint/layer. Use deviations directly instead of
+// subtracting two rounded densities near 1: low pressure drops retain their f32 precision.
+fn zone_layer(b: u32, layer: u32, lid: u32) -> vec2<f32> {
+    let axis = fluid[b + 1u];
+    let a = (axis + 1u) % 3u;
+    let c = (axis + 2u) % 3u;
+    let lo = zone_lo(b);
+    let hi = zone_hi(b);
+    let width = hi[a] - lo[a] + 1u;
+    let count = width * (hi[c] - lo[c] + 1u);
+    var sum = vec2<f32>(0.0);
+    // The trip count is the workgroup's, not the invocation's, so the barriers of the reductions
+    // after this stay in uniform control flow (WGSL's uniformity analysis).
+    for (var base = 0u; base < count; base = base + WG) {
+        let k = base + lid;
+        var xyz = lo;
+        xyz[axis] = layer;
+        xyz[a] = lo[a] + k % width;
+        xyz[c] = lo[c] + k / width;
+        let cell = xyz.x + params.nx * (xyz.y + params.ny * xyz.z);
+        if k < count && is_fluid(cell) {
+            var drho = 0.0;
+            let address = aa_coords(cell);
+            for (var q = 0u; q < Q; q = q + 1u) { drho = drho + population(q, cell, address); }
+            sum = sum + vec2<f32>(drho, 1.0);
+        }
+    }
+    return sum;
+}
+
+@compute @workgroup_size(256)
+fn zone_samples(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+    let z = wg.x;
+    if z >= params.phase.y { return; }
+    let b = zone_base(z);
+    let lo = zone_lo(b);
+    let hi = zone_hi(b);
+    let extent = hi - lo + vec3<u32>(1u);
+    let axis = fluid[b + 1u];
+    var flow = 0.0;
+    let count = extent.x * extent.y * extent.z;
+    for (var base = 0u; base < count; base = base + WG) {
+        let k = base + lid;
+        if k < count {
+            let cell = zone_cell(lo, extent, k);
+            if fluid[params.n + cell] == z + 1u { flow = flow + moments[cell][axis]; }
+        }
+    }
+    let q = zone_float(b, 10u) * zone_reduce(lid, vec4<f32>(flow, 0.0, 0.0, 0.0)).x / f32(fluid[b + 15u]);
+    let sides = vec3<u32>(params.nx, params.ny, params.nz);
+    let before = zone_layer(b, select(0u, lo[axis]-1u, lo[axis] > 0u), lid);
+    let after = zone_layer(b, min(hi[axis]+1u, sides[axis]-1u), lid);
+    let outside = zone_reduce(lid, vec4<f32>(before, after));
+    let first = zone_layer(b, lo[axis], lid);
+    let last = zone_layer(b, hi[axis], lid);
+    let inside = zone_reduce(lid, vec4<f32>(first, last));
+    var up = 0.0;
+    var down = 0.0;
+    if outside.y > 0.0 { up = outside.x / outside.y; }
+    else if inside.y > 0.0 { up = inside.x / inside.y; }
+    if outside.w > 0.0 { down = outside.z / outside.w; }
+    else if inside.w > 0.0 { down = inside.z / inside.w; }
+    let drop = (up - down) / 3.0;
+    if lid == 0u {
+        var pressure = select(drop, -drop, q < 0.0);
+        if fluid[b] == 1u { pressure = -zone_float(b, 10u) * drop; }
+        partials[4u*z] = q;
+        partials[4u*z + 1u] = pressure;
+        partials[4u*z + 2u] = zone_float(b, 12u);
+        partials[4u*z + 3u] = 0.0;
+    }
 }
 
 // Per workgroup, the sum of its cells' densities (the mass, since every cell has unit volume).

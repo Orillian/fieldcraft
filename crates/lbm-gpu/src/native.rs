@@ -190,6 +190,10 @@ pub struct GpuFlow {
     forces: wgpu::Buffer,
     partials: wgpu::Buffer,
     partial_count: usize,
+    /// Where the fans and porous zones are in the flags buffer ([`crate::zones`]).
+    zones: crate::zones::Layout,
+    /// The workgroups of `fan_partials` (one per 256 entries of the fans' cell lists).
+    fan_groups: (u32, u32),
     /// The scalar populations remain A–B with heat; and T₀ they are shifted by.
     thermal: Option<[wgpu::Buffer; 2]>,
     initial_temperature: f64,
@@ -343,9 +347,12 @@ fn solid_data(solid: &fieldcraft_lbm::conduction::SolidHeat, t0: f64) -> Result<
 }
 
 /// The entry points of `lbm.wgsl` a flow dispatches.
-const KERNELS: [&str; 32] = [
+const KERNELS: [&str; 35] = [
     "clear_eddy",
     "gradient_velocity",
+    "fan_partials",
+    "fan_update",
+    "zone_samples",
     "collide",
     "wall_sample",
     "damping_refresh",
@@ -462,6 +469,8 @@ struct Variant {
     hrr: bool,
     vreman: bool,
     dynamic: bool,
+    /// Fans or porous zones.
+    zones: bool,
 }
 
 /// A compiled kernel: its pipeline, its bind group's layout and the bindings in it.
@@ -512,6 +521,7 @@ fn compile(device: &wgpu::Device, variant: Variant) -> Result<Kernels> {
                     ("HRR", if variant.hrr { 1.0 } else { 0.0 }),
                     ("VREMAN", if variant.vreman { 1.0 } else { 0.0 }),
                     ("DYNAMIC", if variant.dynamic { 1.0 } else { 0.0 }),
+                    ("ZONES", if variant.zones { 1.0 } else { 0.0 }),
                     ("MAX_SPEED", MAX_LATTICE_SPEED),
                 ],
                 ..Default::default()
@@ -625,12 +635,13 @@ impl GpuFlow {
                     .into(),
             ));
         }
-        if let Some(zone) = flow.zones().first() {
-            return Err(Error::Invalid(format!(
-                "the GPU backend does not step fans or porous zones yet (`{}`): solve on the CPU (`backend: \"cpu\"`)",
-                zone.name
-            )));
+        // Validate zone values before opening a device or doing device work.
+        let n = flow.grid().len();
+        let mut fluid_u32 = filled(n, 0u32, "cell flags")?;
+        for (cell, flag) in fluid_u32.iter_mut().enumerate() {
+            *flag = u32::from(flow.is_fluid(cell));
         }
+        let zones = crate::zones::append(flow, &mut fluid_u32)?;
         let Some((adapter, tier)) = select::adapter(policy).map_err(gpu_error)? else {
             return Err(Error::Invalid(format!("{}=cpu: no GPU device; solve with `backend: \"cpu\"`", select::ENV)));
         };
@@ -650,7 +661,6 @@ impl GpuFlow {
             Streaming::Auto | Streaming::InPlace => true,
             Streaming::TwoBuffers => false,
         };
-        let n = flow.grid().len();
         let elem = 4u64;
         let pop_bytes = elem * (Q * n) as u64;
         let cap = buffer_cap(&device.limits());
@@ -663,16 +673,19 @@ impl GpuFlow {
             )));
         }
 
+        let flag_bytes = (fluid_u32.len() as u64).checked_mul(4).ok_or_else(|| Error::Limit("too much GPU zone data".into()))?;
+        if flag_bytes > cap {
+            return Err(Error::Limit(format!("GPU cell flags and fan/porous data need {flag_bytes} bytes; this device allows {cap} per buffer")));
+        }
+
         // The state and the flags. The populations go up one direction at a time (below), so
         // the host never holds a whole single-precision copy of them beside the flow's.
         let thermal = flow.thermal();
         let t0 = thermal.map_or(0.0, |t| t.initial());
         let mut fluid = filled(n, false, "cell flags")?;
-        let mut fluid_u32 = filled(n, 0u32, "cell flags")?;
         for cell in 0..n {
-            if let (Some(b), Some(u)) = (fluid.get_mut(cell), fluid_u32.get_mut(cell)) {
+            if let Some(b) = fluid.get_mut(cell) {
                 *b = flow.is_fluid(cell);
-                *u = u32::from(*b);
             }
         }
         // The wall model's wall cells with a second cell: four rows each in `walls`, and in each
@@ -958,7 +971,7 @@ impl GpuFlow {
         let periodic = flow.periodic().map(u32::from);
         let params = [0u32, 1].map(|phase| {
             let mut bytes = params.clone();
-            bytes.extend_from_slice(&bytes_u32(&[phase, 0, 0, 0]));
+            bytes.extend_from_slice(&bytes_u32(&[phase, zones.zones, zones.fans, zones.fan_table]));
             bytes.extend_from_slice(&bytes_u32(&solid_params));
             bytes.extend_from_slice(&bytes_f32(&smag));
             bytes.extend_from_slice(&bytes_u32(&wall_params));
@@ -1014,7 +1027,9 @@ impl GpuFlow {
         let by_group = storage("lbm links by group", &bytes_u32(&by_group));
         let group_start = storage("lbm group start", &bytes_u32(&group_start));
         let forces = empty("lbm forces", 16 * group_count as u64);
-        let partials = empty("lbm partials", 4 * partial_count as u64);
+        // Also each zone's sample (4 floats) and each fan workgroup's flow (`fan_partials`).
+        let partial_slots = partial_count.max(4 * zones.zones as usize).max(zones.fan_groups as usize);
+        let partials = empty("lbm partials", 4 * partial_slots as u64);
         let therm_bytes = elem * (QT * n) as u64;
         let therm = if thermal.is_some() {
             let tb = [empty("lbm t", therm_bytes), empty("lbm t2", therm_bytes)];
@@ -1043,6 +1058,7 @@ impl GpuFlow {
             hrr: hybrid.is_some(),
             vreman: flow.vreman() > 0.0,
             dynamic: hybrid == Some(HrrSigma::Dynamic),
+            zones: zones.zones > 0,
         })?;
         // Every binding's buffer in bind group k (the two differ in the phase and the A–B swap).
         let resource = |binding: u32, k: usize| -> Option<&wgpu::Buffer> {
@@ -1073,6 +1089,8 @@ impl GpuFlow {
                 23 => &walls_buf,
                 24 => &damping_buf,
                 25 => &velocity,
+                // The flags buffer again, writable, for `fan_update` alone (lbm.wgsl).
+                26 => &fluid_buf,
                 _ => return None,
             })
         };
@@ -1132,6 +1150,8 @@ impl GpuFlow {
             forces,
             partials,
             partial_count,
+            zones,
+            fan_groups: groups(zones.fan_groups as usize * WG as usize)?,
             thermal: thermal.map(|_| therm),
             initial_temperature: t0,
             fluid_cells: flow.fluid_cells(),
@@ -1309,7 +1329,7 @@ impl GpuFlow {
     /// solids' with their sub-steps).
     fn dispatches_per_step(&self) -> usize {
         let solid = self.solid.as_ref().map_or(0, |sd| 3 + sd.substeps as usize);
-        13 + solid
+        13 + solid + if self.zones.fans > 0 { 2 } else { 0 }
     }
 
     /// One submission of `steps` (≤ MAX_CHUNK) time steps, then the stability check.
@@ -1317,6 +1337,14 @@ impl GpuFlow {
         self.queue.write_buffer(&self.stats, 0, &bytes_u32(&[0, 0, 0, 0]));
         let mut commands = Vec::with_capacity(self.dispatches_per_step() * steps as usize + 7);
         for step in 0..steps {
+            // Each fan's flow from the populations and its previous push, then its rise moved
+            // toward its curve, before anything else in the step reads the push (as on the CPU).
+            if self.zones.fans > 0 {
+                if self.zones.fan_groups > 0 {
+                    commands.push((self.current, "fan_partials", self.fan_groups));
+                }
+                commands.push((self.current, "fan_update", (self.zones.fans, 1)));
+            }
             if step + 1 == steps {
                 commands.push((self.current, "clear_eddy", (1, 1)));
             }
@@ -1534,6 +1562,22 @@ impl Backend for GpuFlow {
         let partials = self.read_f32(&self.partials, self.partial_count)?;
         // Summed in a fixed order on the host, so the result is deterministic on this device.
         Ok(partials.iter().map(|v| f64::from(*v)).sum::<f64>() / self.fluid_cells.max(1) as f64)
+    }
+
+    fn zones(&mut self) -> Result<Vec<fieldcraft_lbm::ZoneSample>> {
+        let count = self.zones.zones as usize;
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        self.compute_moments()?;
+        self.submit("lbm zone samples", &[(self.current, "zone_samples", (self.zones.zones, 1))])?;
+        let samples = self.read_f32(&self.partials, 4 * count)?;
+        Ok(samples
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|v| fieldcraft_lbm::ZoneSample { flow: f64::from(v[0]), pressure: f64::from(v[1]), fan_rise: f64::from(v[2]) })
+            .collect())
     }
 
     fn groups(&self) -> &[Group] {
