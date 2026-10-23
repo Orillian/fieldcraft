@@ -1,5 +1,8 @@
 # Inlet and outlet transport
 
+[In-app demonstration recipe, settings and measured report](port-transport-video.md).
+The recording and still are intended as attachments on [PR #704](https://github.com/tangency-labs/fieldcraft/pull/704), outside git.
+
 After a fluid solve, expand **Results → Inlets and outlets**. Each open box face shows separate
 inflow and outflow rates, mixed temperature and flow-weighted static gauge pressure. It follows
 the displayed frame, including when a saved solved model is reopened. Backflow is retained on
