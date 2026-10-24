@@ -10,3 +10,9 @@ the indenter's top until the contact closes. One nonlinear static step without n
 geometry: small sliding, edge-to-edge mortar contact of the round edge (secondary) on the flat
 (main) by an augmented Lagrangian. The references and tolerances are the 3D case's, so the two
 discretisations of one problem are checked against one closed form.
+
+As in [the one-layer solid case](../nl-hertz-cylinder/), `normal_force` is the sum of local
+normal projections on the reference curved edge, whereas `force` is the vector resultant for
+global equilibrium. The small curvature distinction (about 0.03125% from `b²/(8R²)`) is
+within the unchanged 0.2% Hertz load tolerance. Refreezing the corrected report changes no
+physical reference, tolerance, assembled force or displacement.

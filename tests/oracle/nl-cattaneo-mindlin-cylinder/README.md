@@ -30,30 +30,31 @@ blocks') carries that moment, so the contact sees the pressure of P and the forc
 | 0.025 | 0.75 | 19 / 39 | 0.487 | 0.1544 | 2888.2 |
 | 0.0125 | 0.75 | 40 / 79 | 0.506 | 0.1543 | 2888.4 |
 
+The table was measured with the earlier node normal (its faces' area vectors summed). Since #731
+the node normal comes from its overlaps, and both the friction law's tangent plane and the report
+use it (see below). At h = 0.025 that moves q(0)/p(0) to 0.0901 (Q = 0.5 μP) and 0.1534
+(Q = 0.75 μP), and p₀ to 2888.6 at Q = 0.75 μP. The slipping counts are unchanged. The other
+meshes were not rerun.
+
 The case uses h = 0.025 (about 25 s for both steps in a release build). The share of slipping
-nodes is within one node of 1 − c/a and settles on it with the mesh; the shear at the centre stays 3% above μ(1 − c/a) on every mesh: the bodies are a few
+nodes is within one node of 1 − c/a and settles on it with the mesh; the shear at the centre stays 2–3% above μ(1 − c/a) on every mesh: the bodies are a few
 half-widths deep rather than half-planes, and the stick zone sits slightly towards the leading
 edge (at h = 0.025 and Q = 0.5 μP it spans −0.30 ≤ x ≤ 0.35 against |x| < 0.354). The ratio of
 the tangential to the normal force across the contact is not among the quantities: the soft
 springs hold the indenter, so equilibrium makes the contact carry the applied Q whatever its
 stick and slip zones are, and Q/P would only restate the applied ratio.
 
-In the slip zones the probe's nodal shear over μ times its nodal pressure is 0.92–0.95 at the
-trailing edge and 1.07–1.09 at the leading edge on every mesh (their mean is 1), a departure of
-about x/(2μR): first order in the tilt, so not the global-x component of the shear (that differs
-by 1 − cos θ ≈ θ²/2, about 1e-3). It is the frame of the report. Without nonlinear geometry the
-contact is small sliding: the normal force and the slip operator P = I − n n use each secondary
-face's reference normal, tilted by x/R on the round edge. The probe splits the nodal force with
-the node's current normal (from the deformed faces), and two bodies of one material meet on an
-interface of radius about 2R, so that normal tilts by about x/(2R) (measured: 0.45–0.57 x/R over
-the contact). The two differ by about x/(2R), and that share of the pressure p lands in the
-reported shear, p x/(2R), positive at one edge and negative at the other. This is the mismatch
-PR #731 finds in the contact report (which there understates the pressure at a corner).
+Before #731, in the slip zones the probe's nodal shear over μ times its nodal pressure was
+0.92–0.95 at the trailing edge and 1.07–1.09 at the leading edge on every mesh (mean 1), a
+departure of about x/(2μR). The cause was the frame of the report. Without nonlinear geometry
+the contact is small sliding: the normal force and the slip operator P = I − n n use each
+secondary face's reference normal, tilted by x/R on the round edge. The probe split the nodal
+force with the node's current normal, built from the deformed faces, which tilts by about x/(2R)
+on an interface of two bodies of one material. That share of the pressure, p x/(2R), landed in
+the reported shear, positive at one edge and negative at the other. Split with the reference
+normal (same probe output, h = 0.025), q/(μp) at the slipping nodes was 0.9997–1.0004.
 
-The friction law itself sees no first-order tilt. Its traction acts through B_A, built with the
-reference normal, so the friction force is tangential to the reference face, of size μp cos(x/2R)
-where nodes slip: second order, about 3e-4 at x = a. Split with the reference normal instead (the
-same probe output, h = 0.025), q/(μp) at the slipping nodes is 0.9997–1.0004 inside both slip
-zones and 0.9989–1.0012 at the outermost closed node, for both shears; only the node at each
-stick–slip boundary, which slips over part of its support, lies between (0.88–0.98). Per node
-the probe is therefore not a check of q = μp until the report uses the projection normal.
+Since #731 a node's normal is its overlaps' normals weighted by its support: in small sliding,
+the reference pairs' normals. The report and the friction law's projection of the committed
+traction both use it, so the probe's per-node shear and pressure are split in the frame the law
+enforces the cone in.

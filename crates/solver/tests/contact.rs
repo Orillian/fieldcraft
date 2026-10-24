@@ -191,6 +191,60 @@ fn near(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
 }
 
+/// A flat contact whose secondary surface also contains the cube's uncontacted sides, of linear
+/// and quadratic faces, in small and finite sliding. Those sides must not tilt the normal of the
+/// nodes the bottom face carries: the normal force is the assembled force, every bottom node
+/// (corners included) carries pressure and the others none, and a hex8's pressure is the force
+/// over the unit area at every bottom node.
+#[test]
+fn uncontacted_corner_faces_do_not_tilt_reported_pressure() {
+    for (kind, nonlinear_geometry) in [(ElementKind::Hex8, false), (ElementKind::Hex8, true), (ElementKind::Hex20, false), (ElementKind::Hex20, true)]
+    {
+        let mut b = Blocks::default();
+        let low = b.block(ElementKind::Hex8, [1, 1, 1], |p| p);
+        let upper = b.block(kind, [1, 1, 1], |p| [p[0], p[1], p[2] + 1.0]);
+        b.define(1000.0, 0.0, NonlinearStatic { nonlinear_geometry, initial_increment: 1.0, ..NonlinearStatic::default() });
+        b.face_set("main", &low, |p| near(p[2], 1.0));
+        b.face_set("secondary", &upper, |_| true);
+        b.pair("Interface", "main", "secondary");
+        let base = b.model.element(low[0]).unwrap().nodes.clone();
+        let rest: Vec<u32> = b.nodes(|_| true).into_iter().filter(|l| !base.contains(l)).collect();
+        let bottom: Vec<u32> = rest.iter().copied().filter(|l| near(b.xyz[l][2], 1.0)).collect();
+        let top: Vec<u32> = rest.iter().copied().filter(|l| near(b.xyz[l][2], 2.0)).collect();
+        for (name, nodes, values) in [
+            ("base", base, [Some(0.0), Some(0.0), Some(0.0), None, None, None]),
+            ("upper", rest, [Some(0.0), Some(0.0), None, None, None, None]),
+            ("top", top, [None, None, Some(-0.01), None, None, None]),
+        ] {
+            b.model.add_set(name, Set { nodes, ..Set::default() }).unwrap();
+            b.model.add_boundary_condition(name, BoundaryCondition::Displacement { target: Target::Set(name.into()), values }).unwrap();
+            b.model.set_boundary_condition_active("Step", name, true).unwrap();
+        }
+        let r = solve_nonlinear(&b.model, Some("Step"), &Limits::default()).unwrap();
+        let contact = &r.contacts[0];
+        let normal = contact.force[2];
+        let case = format!("{} (nonlinear geometry {nonlinear_geometry})", kind.name());
+        // About E·ε = 10 (less under finite strain, and by the augmentation's remaining gap).
+        assert!(normal > 9.5 && normal <= 10.0, "{case}: physical compression force: {normal}");
+        // The uncontacted sides would tilt the corners' normals by about 55° (a third of their
+        // force lost); a quadratic face pressed to slightly different gaps bends by far less.
+        assert!((contact.normal_force - normal).abs() < 1e-6 * normal, "{case}: normal force {} against {normal}", contact.normal_force);
+        for (label, pressure) in contact.nodes.iter().zip(&contact.pressure) {
+            if !bottom.contains(label) {
+                assert_eq!(*pressure, 0.0, "{case}: node {label}");
+            } else if kind == ElementKind::Hex8 {
+                // Uniform pressure on a unit-area interface equals its actual assembled force;
+                // this checks reporting independently of the augmentation's stopping gap.
+                assert!((pressure - normal).abs() < 1e-9 * normal, "{case}: bottom node {label}: pressure {pressure}, physical force {normal}");
+            } else {
+                // A hex20's corner and mid-side nodes are penalised over their whole secondary
+                // area (side faces too), so they close to slightly different gaps (#775).
+                assert!((pressure - normal).abs() < 0.03 * normal, "{case}: bottom node {label}: pressure {pressure}, physical force {normal}");
+            }
+        }
+    }
+}
+
 fn report(r: &StaticResult) {
     let h = r.nonlinear.as_ref().unwrap();
     for inc in &h.increments {
@@ -613,17 +667,25 @@ fn hertz_sphere_on_a_flat() {
 /// (both in proportion over the step), with Coulomb friction `friction`; the reactions at the
 /// top (normal, tangential) and the result.
 fn sheared(down: f64, side: f64, friction: Friction, finite: bool) -> (f64, f64, StaticResult) {
-    sheared_blocks(ElementKind::Hex8, down, side, friction, finite)
+    sheared_blocks(ElementKind::Hex8, down, side, friction, finite, false)
 }
 
-/// [`sheared`] with blocks of `kind`.
-fn sheared_blocks(kind: ElementKind, down: f64, side: f64, friction: Friction, finite: bool) -> (f64, f64, StaticResult) {
+/// [`sheared`] with blocks of `kind`; `whole`: every face of the upper block is on the secondary
+/// surface (its sides and top too), not only its bottom.
+fn sheared_blocks(kind: ElementKind, down: f64, side: f64, friction: Friction, finite: bool, whole: bool) -> (f64, f64, StaticResult) {
     let mut b = Blocks::default();
     let low = b.block(kind, [3, 3, 1], |p| p);
     let up = b.block(kind, [2, 2, 1], |p| [p[0], p[1], 1.0 + p[2]]);
     b.define(1000.0, 0.3, NonlinearStatic { nonlinear_geometry: finite, initial_increment: 0.25, ..NonlinearStatic::default() });
     b.face_set("lower_top", &low, |x| near(x[2], 1.0));
-    b.face_set("upper_bottom", &up, |x| near(x[2], 1.0));
+    // The upper block's bottom, or its whole boundary (each side's faces).
+    let mut faces = b.faces(&up, |x| near(x[2], 1.0));
+    if whole {
+        for (k, at) in [(0, 0.0), (0, 1.0), (1, 0.0), (1, 1.0), (2, 2.0)] {
+            faces.extend(b.faces(&up, |x| near(x[k], at)));
+        }
+    }
+    b.model.add_set("upper_bottom", Set { faces, ..Set::default() }).unwrap();
     let mut c = Contact::new(ContactSurfaces::Pair { main: "lower_top".into(), secondary: "upper_bottom".into() });
     c.friction = friction;
     b.model.add_contact("interface", c).unwrap();
@@ -679,10 +741,32 @@ fn coulomb_friction_sticks_below_the_cone_and_slips_on_it() {
 #[test]
 fn quadratic_faces_slip_carrying_mu_n() {
     let mu = 0.3;
-    let (n, t, r) = sheared_blocks(ElementKind::Hex20, 0.01, 0.03, Friction::coulomb(mu), false);
+    let (n, t, r) = sheared_blocks(ElementKind::Hex20, 0.01, 0.03, Friction::coulomb(mu), false, false);
     eprintln!("hex20: N {n:.4} T {t:.4}");
     assert!((t - mu * n).abs() < 1e-3 * mu * n, "T {t} vs μN {}", mu * n);
     assert!(r.contacts[0].status.iter().all(|s| *s == Status::Slip), "{:?}", r.contacts[0].status);
+}
+
+/// The node normal at the corners of a frictional contact: with the upper block's sides on the
+/// secondary surface too, its slipping bottom carries μ N, and every node's reported shear is μ
+/// times its pressure, as the friction law's cone asks (with the sides' area vectors in the
+/// normal the corners reported up to 25 μ p).
+#[test]
+fn uncontacted_sides_do_not_tilt_the_friction_plane() {
+    let mu = 0.3;
+    for finite in [false, true] {
+        let (n, t, r) = sheared_blocks(ElementKind::Hex8, 0.01, 0.03, Friction::coulomb(mu), finite, true);
+        let tol = if finite { 0.03 } else { 1e-3 };
+        assert!((t - mu * n).abs() < tol * mu * n, "finite {finite}: T {t} vs μN {}", mu * n);
+        let c = &r.contacts[0];
+        for (((label, p), s), q) in c.nodes.iter().zip(&c.pressure).zip(&c.status).zip(&c.shear) {
+            assert_eq!(*p > 0.0, *s == Status::Slip, "finite {finite}: node {label}: pressure {p}, {s:?}");
+            if *p > 0.0 {
+                let ratio = q.iter().map(|v| v * v).sum::<f64>().sqrt() / (mu * p);
+                assert!((ratio - 1.0).abs() < 5e-3, "finite {finite}: node {label}: shear over μ p {ratio}");
+            }
+        }
+    }
 }
 
 /// Two blocks of non-matching meshes tied at z = 1 (`lower_kind` 3 × 3 × 2, graded or distorted,
@@ -1143,11 +1227,22 @@ fn a_plane_strain_ring_closes_on_itself_as_the_solid_ring_does() {
     // Each edge node closes where its face nodes do (two per edge node, at z = 0 and 0.2).
     assert_eq!(2 * c2.closed(), c3.closed());
     // The same motion: every node of the plane against the solid's node at z = 0.
+    let peak = c2.pressure.iter().copied().fold(0.0, f64::max);
+    assert!(peak > 0.0);
+    // Both independently solved models report the same contact, including where an end face
+    // meets an uncontacted outer or Z face. Compare fields, not a frozen value from either
+    // dimensional discretisation; their motions already agree to the tolerance below.
+    assert!((c2.normal_force - c3.normal_force).abs() < 1e-5 * c2.normal_force.abs());
+    let pressure =
+        |contact: &fieldcraft_solver::contact::ContactResult, node| contact.nodes.binary_search(&node).ok().map_or(0.0, |i| contact.pressure[i]);
     let mut checked = 0;
     for (l, x) in &b2.xyz {
         let Some((m, _)) = b3.xyz.iter().find(|(_, y)| (y[0] - x[0]).abs() < 1e-9 && (y[1] - x[1]).abs() < 1e-9 && y[2] == 0.0) else { continue };
         let (u, v) = (r2.displacement[r2.nodes.binary_search(l).unwrap()], r3.displacement[r3.nodes.binary_search(m).unwrap()]);
         assert!((u[0] - v[0]).abs() < 1e-5 && (u[1] - v[1]).abs() < 1e-5, "node {l}: {u:?} {v:?}");
+        for (solid, _) in b3.xyz.iter().filter(|(_, y)| (y[0] - x[0]).abs() < 1e-9 && (y[1] - x[1]).abs() < 1e-9) {
+            assert!((pressure(c2, *l) - pressure(c3, *solid)).abs() < 1e-5 * peak, "pressure at plane node {l}, solid node {solid}");
+        }
         checked += 1;
     }
     assert_eq!(checked, b2.xyz.len());

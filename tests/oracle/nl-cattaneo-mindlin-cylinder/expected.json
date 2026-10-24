@@ -49,7 +49,7 @@
    "tolerance": {
     "relative": 0.05
    },
-   "reason": "q = μp₀ (√(1 − x²/a²) − (c/a) √(1 − x²/c²)) in the stick zone, so q(0)/p(0) = μ(1 − c/a) at the secondary node at x = 0 (node 31); the bodies are a few half-widths deep, not half-planes, which shifts the stick zone towards the leading edge and puts the centre 3% above the closed form on every mesh (README)"
+   "reason": "q = μp₀ (√(1 − x²/a²) − (c/a) √(1 − x²/c²)) in the stick zone, so q(0)/p(0) = μ(1 − c/a) at the secondary node at x = 0 (node 31); the bodies are a few half-widths deep, not half-planes, which shifts the stick zone towards the leading edge and puts the centre 2–3% above the closed form on every mesh (README)"
   },
   {
    "id": "slip_fraction_75",
@@ -96,7 +96,7 @@
    "tolerance": {
     "relative": 0.05
    },
-   "reason": "q = μp₀ (√(1 − x²/a²) − (c/a) √(1 − x²/c²)) in the stick zone, so q(0)/p(0) = μ(1 − c/a) at the secondary node at x = 0 (node 31); the bodies are a few half-widths deep, not half-planes, which shifts the stick zone towards the leading edge and puts the centre 3% above the closed form on every mesh (README)"
+   "reason": "q = μp₀ (√(1 − x²/a²) − (c/a) √(1 − x²/c²)) in the stick zone, so q(0)/p(0) = μ(1 − c/a) at the secondary node at x = 0 (node 31); the bodies are a few half-widths deep, not half-planes, which shifts the stick zone towards the leading edge and puts the centre 2–3% above the closed form on every mesh (README)"
   },
   {
    "id": "peak_pressure_75",

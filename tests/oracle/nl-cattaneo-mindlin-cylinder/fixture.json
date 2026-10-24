@@ -2,16 +2,16 @@
   "note": "FieldCraft's accepted results for this case, written by `cargo xtask oracle --bless`. A result outside its band fails CI.",
   "values": {
     "centre_traction_50": {
-      "band": 9.061613245394095e-11,
-      "value": 0.09061613245394094
+      "band": 9.007786371819581e-11,
+      "value": 0.0900778637181958
     },
     "centre_traction_75": {
-      "band": 1.5436745423915027e-10,
-      "value": 0.15436745423915027
+      "band": 1.534291000813069e-10,
+      "value": 0.1534291000813069
     },
     "peak_pressure_75": {
-      "band": 2.8881792311858025e-6,
-      "value": 2888.179231185802
+      "band": 2.8885867020168263e-6,
+      "value": 2888.586702016826
     },
     "slip_fraction_50": {
       "band": 0.000030000307692307692,

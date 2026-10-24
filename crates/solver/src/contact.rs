@@ -70,10 +70,18 @@
 //! weighted gap: strain-free, the nodes are not moved), `refuse` refuses the step naming the
 //! first node and its depth.
 //!
+//! **Node normal.** A secondary node's normal is the sum of its overlaps' projection normals
+//! weighted by its support, Σ ∫ Φ_A n dA, normalised (in small sliding the reference pairs'
+//! normals): only the faces that carry the node's contact turn it, so the uncontacted sides of a
+//! surface's corner leave it alone, and a quadratic pair's facets each count with their own
+//! normal. The friction return map's tangent plane and the reported pressure and shear use it.
+//!
 //! **Output.** Per secondary node the pressure as the node's normal contact force over the area
 //! it carries (∫ Φ_A over the overlaps: smoother than the multipliers, which are the coefficients
 //! of the pressure field and ring at the contact's edge), the multiplier, the gap and the status;
-//! per contact the force on the secondary surface and its normal part.
+//! per contact the force on the secondary surface and the sum of the local normal components.
+//! On a curved surface this scalar sum is not a component of the resultant along one fixed
+//! direction: compare `force` with global equilibrium and `normal_force` with integrated pressure.
 //!
 //! **Single-surface (general) contact** is the same mortar contact with one face list as both
 //! sides: a set's faces, or every exterior face of the solids. Each face is a secondary face
@@ -257,8 +265,10 @@ pub struct State {
     pub pressure: Vec<f64>,
     /// ∫ Φ_A over the overlaps (the area the pressure acts on).
     pub support: Vec<f64>,
-    /// The force the contact puts on each secondary node, and the node's unit outward normal
-    /// (its faces' area vectors summed).
+    /// The force the contact puts on each secondary node, and the node's unit outward normal:
+    /// its overlaps' projection normals weighted by its support, Σ ∫ Φ_A n normalised (the
+    /// reference pairs' in small sliding), zero where nothing overlaps the node or the overlaps
+    /// cancel. The friction law's tangent plane and the reported pressure and shear share it.
     pub nodal_force: Vec<Vec3>,
     pub normal: Vec<Vec3>,
     /// Friction: the tangential traction on each secondary node (on it, against its slip), its
@@ -291,7 +301,7 @@ pub struct ContactResult {
     /// The secondary surface's node labels, sorted.
     pub nodes: Vec<u32>,
     /// The contact pressure: the normal contact force on the node over the area it carries
-    /// (∫ Φ_A over the overlaps), so that Σ p_A ∫Φ_A is the force across the contact.
+    /// (∫ Φ_A over the overlaps), so that Σ p_A ∫Φ_A is `normal_force`.
     pub pressure: Vec<f64>,
     /// The mortar multipliers (the coefficients of the pressure field, Φ_A-interpolated).
     pub multiplier: Vec<f64>,
@@ -304,8 +314,10 @@ pub struct ContactResult {
     /// The normalised gap ĝ (negative: penetration), `None` where no main face is over the node.
     pub gap: Vec<Option<f64>>,
     pub status: Vec<Status>,
-    /// The force the contact puts on the secondary surface, and its normal part Σ p_A ∫Φ_A.
+    /// The vector sum of the forces the contact puts on the secondary surface.
     pub force: Vec3,
+    /// Sum of the local normal components, Σ p_A ∫Φ_A. On a curved contact this need not
+    /// equal the resultant's magnitude or its component in a fixed load direction.
     pub normal_force: f64,
     /// The deepest penetration of a closed node.
     pub penetration: f64,
@@ -558,6 +570,33 @@ struct Found {
     main: usize,
     gap: [f64; FACE_NODES],
     support: [f64; FACE_NODES],
+    /// ∫ Φ_a n per node a: the support-weighted projection normal of the overlap (a quadratic
+    /// pair's facets each with their own).
+    normal: [Vec3; FACE_NODES],
+}
+
+/// Each secondary node's unit normal: the sum of its overlaps' support-weighted normals
+/// Σ ∫ Φ_A n, so that only the faces carrying the node's contact turn it (the uncontacted sides
+/// at a corner do not). Opposing supports can cancel: a zero sum has no direction, and the node
+/// gets none (zero) rather than an invented one.
+fn normals(pairs: &[Vec<Found>], corner_index: &[Vec<usize>], support: &[f64]) -> Vec<Vec3> {
+    let mut normals = vec![[0.0; 3]; support.len()];
+    for (found, corners) in pairs.iter().zip(corner_index) {
+        for pair in found {
+            for (i, weighted) in corners.iter().zip(&pair.normal) {
+                let (Some(normal), Some(&total)) = (normals.get_mut(*i), support.get(*i)) else { continue };
+                if total > 0.0 {
+                    // Over the node's support before adding, so that large finite areas cannot
+                    // overflow the sum: it is a direction.
+                    (0..3).for_each(|k| normal[k] += weighted[k] / total);
+                }
+            }
+        }
+    }
+    for normal in &mut normals {
+        *normal = unit(*normal).unwrap_or_default();
+    }
+    normals
 }
 
 /// The weighted gaps g̃_a of one linear face pair (corners `xs`, `xm`) over any scalar (quadratic
@@ -953,7 +992,7 @@ impl Interface {
                         }
                         dot(v, p.normal)
                     });
-                    Found { main: p.main, gap, support: p.support }
+                    Found { main: p.main, gap, support: p.support, normal: p.support.map(|a| p.normal.map(|n| a * n)) }
                 })
                 .collect()
         }))
@@ -1014,18 +1053,21 @@ impl Interface {
                 if dot(ns, *nm) >= -FACING * norm(ns) * norm(*nm) {
                     continue;
                 }
-                let (mut gap, mut support, mut deepest, mut any) = ([0.0; FACE_NODES], [0.0; FACE_NODES], f64::INFINITY, false);
+                let (mut gap, mut support, mut normal) = ([0.0; FACE_NODES], [0.0; FACE_NODES], [[0.0; 3]; FACE_NODES]);
+                let (mut deepest, mut any) = (f64::INFINITY, false);
                 integrate_pair(self.extent, &xs, xm, |p| {
                     any = true;
                     let g = p.gap();
                     deepest = deepest.min(g);
                     for a in 0..FACE_NODES {
                         gap[a] += p.weight * g * p.multiplier[a];
-                        support[a] += p.weight * p.multiplier[a];
+                        let w = p.weight * p.multiplier[a];
+                        support[a] += w;
+                        (0..3).for_each(|k| normal[a][k] += w * p.normal[k]);
                     }
                 });
-                if any && deepest >= -m.depth && gap.iter().chain(&support).all(|v| v.is_finite()) {
-                    found.push(Found { main: c, gap, support });
+                if any && deepest >= -m.depth && gap.iter().chain(&support).chain(normal.iter().flatten()).all(|v| v.is_finite()) {
+                    found.push(Found { main: c, gap, support, normal });
                 }
             }
             keep(&xs, &main_x, found)
@@ -1095,28 +1137,18 @@ impl Interface {
         let multipliers = committed.multipliers.as_slice();
         let pairs = self.pairs(mesh, u)?;
         let (weighted, support, corner_index) = self.sums(&pairs);
+        let normal = normals(&pairs, &corner_index, &support);
         let n = self.nodes.len();
         let mut state = State {
             gap: vec![None; n],
             pressure: vec![0.0; n],
             support,
             nodal_force: vec![[0.0; 3]; n],
-            normal: vec![[0.0; 3]; n],
+            normal,
             traction: Vec::new(),
             slip: Vec::new(),
             slipping: Vec::new(),
         };
-        for (f, corners) in self.secondary.iter().zip(&corner_index) {
-            let Some(a) = area_of(self.extent, &Interface::corners(mesh, u, f)) else { continue };
-            for i in corners {
-                if let Some(v) = state.normal.get_mut(*i) {
-                    (0..3).for_each(|k| v[k] += a[k]);
-                }
-            }
-        }
-        for v in &mut state.normal {
-            *v = unit(*v).unwrap_or(*v);
-        }
         // Nodes closed, or open by less than `band` of their element's thickness: their penalty
         // stays in the tangent.
         let mut engaged = vec![false; n];
@@ -1245,8 +1277,8 @@ impl Interface {
     /// Coulomb friction at the closed secondary nodes by a return map (Wriggers 2006, §5.2;
     /// Simo & Laursen 1992): the weighted tangential slip of each node since the last converged
     /// increment, w_A = Σ ∫ Φ_A (I − n n)(Δx_s − Δx_m) dA = B_A Δx ([`slip_operator`]) and
-    /// ĝ_T = w_A / A_A; the trial traction
-    /// t* = P t_n − ε_A ĝ_T (P projects the committed traction on the current tangent plane);
+    /// ĝ_T = w_A / A_A; the trial traction t* = P t_n − ε_A ĝ_T (P projects the committed
+    /// traction on the tangent plane of the node normal);
     /// stick, t = t*, when |t*| ≤ μ p_A, else slip back to the cone, t = μ p_A t*/|t*|, μ the
     /// static coefficient for a node that stuck in the last increment and the kinetic one for
     /// one that slipped. The traction does the virtual work t · B_A δx, so the forces −B_Aᵀ t enter
@@ -1480,6 +1512,9 @@ impl Interface {
         worst
     }
 }
+
+#[cfg(test)]
+mod normal_tests;
 
 #[cfg(test)]
 mod tests {
