@@ -345,10 +345,10 @@ fn file_access_stays_inside_the_roots() {
 #[test]
 fn roots_imply_headless() {
     let d = Dir::new("connect");
-    let options = Options { connect: Some("127.0.0.1:1".into()), roots: Roots::new(Some(&d.0), None).unwrap() };
+    let options = Options { connect: Some("127.0.0.1:1".into()), roots: Roots::new(Some(&d.0), None).unwrap(), ..Options::default() };
     assert!(crate::backend(options).err().unwrap().contains("cannot be combined"));
     // An app that cannot be reached: headless, with a note.
-    let (b, note) = crate::backend(Options { connect: Some("127.0.0.1:1".into()), roots: Roots::default() }).unwrap();
+    let (b, note) = crate::backend(Options { connect: Some("127.0.0.1:1".into()), ..Options::default() }).unwrap();
     assert!(note.unwrap().contains("running headless"));
     assert!(b.describe().contains("headless"));
 }

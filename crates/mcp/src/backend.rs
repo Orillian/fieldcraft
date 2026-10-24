@@ -137,11 +137,25 @@ impl Headless {
         session.file_access = roots.clone();
         Headless { session, view: Aim::new(Orientation::of(StandardView::Iso)), roots, camera_seen: 0 }
     }
+
+    /// Record ordinary solver failures in `dir` ([`Session::solver_diagnostics`]); a failed
+    /// command's reply then names its record.
+    pub fn with_solver_diagnostics(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.session.solver_diagnostics = dir;
+        self
+    }
 }
 
 impl Backend for Headless {
     fn execute(&mut self, command: &str, params: Value) -> Result<Value, String> {
-        self.session.execute(command, &params).map_err(|e| e.to_string())
+        let result = self.session.execute(command, &params);
+        // A stopped result names its record itself (`diagnostic_report`); an error gets it after
+        // its message, with the home folder shown as `~`.
+        let report = self.session.take_solver_diagnostic().map(|p| fieldcraft_engine::crash::without_home(&p.to_string_lossy()));
+        result.map_err(|e| match report {
+            Some(report) => format!("{e} (solver diagnostic: {report})"),
+            None => e.to_string(),
+        })
     }
 
     fn commands(&mut self) -> Result<Value, String> {

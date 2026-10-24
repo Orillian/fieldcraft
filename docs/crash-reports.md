@@ -37,6 +37,49 @@ temporary folder instead, so test runs never reach your folders. `FIELDCRAFT_CRA
 crash folder, `FIELDCRAFT_RECOVERY_DIR` the recovery folder. The browser build keeps no crash
 folder and logs to the browser console.
 
+## Solver diagnostics
+
+A solve that fails, or stops before the end of its step, leaves a small record in the crash
+folder (`kind: "solver_error"`, `format: "fieldcraft-diagnostic/1"`): when it does not converge,
+its system is singular, it goes unstable or diverges, an element fails, or its device (GPU)
+fails; and when a steady flow reaches its time cap without settling or an explicit step stops at
+its increment cap. A refusal of the request leaves none: a work cap such as `max_dofs` or
+`max_cells`, a parameter that is wrong, a feature not supported yet. Neither does a cancelled
+solve, nor a transient that reaches its end time.
+
+A record holds the command and its parameters (up to 16 KiB), the model's size, the step and the
+progress reached, the backend asked for and the one that ran, and, for a GPU solve, what its
+setup saw: the adapter, backend, driver, the limits that matter (storage buffers per stage,
+buffer sizes) and the devices and instances the process has opened (the fluid solver's own;
+the viewport's and the driver's are not counted). What was not observed stays `null`. Home
+folders are shown as `~`. No model, replay, log or backtrace is copied, and a record never
+brings up the "FieldCraft closed unexpectedly" question.
+
+The same failure again counts in its record; at most five new records are written per process.
+Records share the crash folder's limits (20 reports, 100 MB, 90 days) and are the first to go
+when it is over them, before any crash report. Writing a record never changes the solve's
+outcome: its error stays the same error, and a stopped result gains the record's path as
+`diagnostic_report`.
+
+Help › Crash Reports, `diagnostics.crash_reports` and `fieldcraft-cli crashes` list them;
+`diagnostics.crash_report` reads one. The app, `fieldcraft-cli run` and `fieldcraft-cli mcp`
+record into the crash folder; the CLI prints the path of the record on stderr and the MCP reply
+of a failed command ends with it. A `Session` embedded in another program records nothing
+unless its host names a folder (`Session::solver_diagnostics`).
+
+### Headless workers
+
+In a container or on a cloud instance, the crash folder goes with the machine. Set
+`FIELDCRAFT_CRASH_DIR` to a persistent folder before starting the CLI or the MCP server, and keep
+that folder as a job artifact:
+
+```sh
+FIELDCRAFT_CRASH_DIR=/work/fieldcraft-reports fieldcraft-cli run model.json
+```
+
+With confined file access (`--automation-write-root`), the folder must be inside the write root,
+or nothing is recorded.
+
 ## The log file
 
 `logs/fieldcraft.log`: one line per record, `time LEVEL [pid] target: message`. Past 2 MB it

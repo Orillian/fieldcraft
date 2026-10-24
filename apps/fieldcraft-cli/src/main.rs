@@ -49,9 +49,9 @@ usage:
       --automation-write-root DIR      files may be written only inside DIR (with either root,
                                        the access a root left out is not granted)
   fieldcraft-cli crashes [list|show <id>|replay <id>|dir|clear [<id>]]
-                                       the crash reports the desktop app wrote on this
-                                       computer (docs/crash-reports.md): list them (--json),
-                                       show one, replay one (does the crash happen again?),
+                                       local crash reports and solver diagnostics
+                                       (docs/crash-reports.md): list them (--json), show one,
+                                       replay a crash (does it happen again?),
                                        print their folder, delete them
   fieldcraft-cli update --check        is a newer FieldCraft published? (app.update.check; JSON)
   fieldcraft-cli update --install      download the latest release, verify its signature and
@@ -144,7 +144,8 @@ fn mcp_options(args: &[String]) -> Result<fieldcraft_mcp::Options, String> {
         (None, None) => fieldcraft_io::roots::Roots::default(),
         _ => fieldcraft_io::roots::Roots::new(read.as_deref().map(Path::new), write.as_deref().map(Path::new)).map_err(|e| e.to_string())?,
     };
-    Ok(fieldcraft_mcp::Options { connect, roots })
+    // A failed or stopped solve leaves a record in the crash folder (docs/crash-reports.md).
+    Ok(fieldcraft_mcp::Options { connect, roots, solver_diagnostics: fieldcraft_engine::crash::default_dir() })
 }
 
 fn mcp(args: &[String]) -> Result<(), String> {
@@ -170,8 +171,14 @@ fn session_of(path: &str) -> Result<Session, String> {
     }
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let script: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+    // A failed or stopped solve leaves a record in the crash folder (docs/crash-reports.md).
     let mut session = Session::default();
-    session.run_script(&script).map_err(|e| e.to_string())?;
+    session.solver_diagnostics = fieldcraft_engine::crash::default_dir();
+    let run = session.run_script(&script);
+    if let Some(report) = session.take_solver_diagnostic() {
+        eprintln!("fieldcraft-cli: solver diagnostic {}", report.display());
+    }
+    run.map_err(|e| e.to_string())?;
     Ok(session)
 }
 

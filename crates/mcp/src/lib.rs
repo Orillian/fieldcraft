@@ -35,13 +35,17 @@ pub struct Options {
     pub connect: Option<String>,
     /// Folders file access is confined to; unconfined by default.
     pub roots: Roots,
+    /// Where a headless session records ordinary solver failures
+    /// ([`fieldcraft_engine::Session::solver_diagnostics`]); `None` records nothing.
+    pub solver_diagnostics: Option<std::path::PathBuf>,
 }
 
 /// The backend `options` ask for, and a note for stderr when the server falls back to headless
 /// because the app cannot be reached. Confined roots with `connect` are refused: the app would
 /// read and write files the roots do not cover.
 pub fn backend(options: Options) -> Result<(Box<dyn Backend>, Option<String>), String> {
-    let headless = |roots: Roots| -> Box<dyn Backend> { Box::new(Headless::new(roots)) };
+    let diagnostics = options.solver_diagnostics;
+    let headless = |roots: Roots| -> Box<dyn Backend> { Box::new(Headless::new(roots).with_solver_diagnostics(diagnostics)) };
     match options.connect {
         Some(addr) if options.roots.is_confined() => Err(format!(
             "--connect {addr} cannot be combined with --automation-read-root or --automation-write-root: the app is not confined by them (they imply --headless)"
