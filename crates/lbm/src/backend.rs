@@ -164,7 +164,7 @@ pub fn backend(choice: Choice, flow: Flow, setup: &Setup) -> Result<Box<dyn Back
         Choice::Cpu => Ok(Box::new(flow)),
         Choice::Device => match backend_factory() {
             Some(make) => make(&flow, setup),
-            None => Err(Error::Invalid("no GPU backend is available in this build: solve on the CPU (`backend: \"cpu\"`)".into())),
+            None => Err(Error::Backend("no GPU backend is available in this build: solve on the CPU (`backend: \"cpu\"`)".into())),
         },
     }
 }

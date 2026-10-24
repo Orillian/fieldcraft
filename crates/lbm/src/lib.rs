@@ -103,6 +103,9 @@ pub enum Error {
     /// The run diverged.
     #[error("unstable: {0}")]
     Unstable(String),
+    /// A device backend could not be selected, created or stepped.
+    #[error("backend error: {0}")]
+    Backend(String),
     #[error(transparent)]
     Model(#[from] fieldcraft_model::Error),
     #[error(transparent)]
