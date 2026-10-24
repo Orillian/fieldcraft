@@ -12,9 +12,13 @@
 //!   or a copy taken when the model was opened) and the commands run since, ending with the one
 //!   in flight, plus the app's last control request and the dead run's lines of the log file
 //!   ([`crate::logfile`]).
-//! - **Cost**: nothing until [`install`] is called (tests, the CLI and the web build never do);
-//!   after that, two small unbuffered appends per top-level command of the app's own model
-//!   ([`Session::crash_journal`]), and work only when something panics.
+//! - **Solver errors**: a session whose host names a folder ([`Session::solver_diagnostics`])
+//!   writes a small local record of a failed or stopped solve ([`solver_error`]), without
+//!   copying the model or presenting a startup crash prompt.
+//! - **Cost**: the crash journal does nothing until [`install`] is called; after that, two
+//!   small unbuffered appends per top-level command of the app's own model
+//!   ([`Session::crash_journal`]). Reports are assembled only after a panic, recovered crash,
+//!   or a recorded solver failure, never during solver iterations.
 //! - **Bounded**: the same crash (its signature: place + message, digits ignored) is counted, not
 //!   written again; at most [`MAX_NEW_PER_SESSION`] new reports per run, [`MAX_REPORTS`]
 //!   reports, [`MAX_TOTAL_BYTES`] on disk, nothing older than [`MAX_AGE_DAYS`] days.
@@ -98,7 +102,7 @@ impl Build {
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Summary {
     pub id: String,
-    /// `command_panic`, `panic`, `recovered_panic` or `unclean_exit`.
+    /// `command_panic`, `panic`, `recovered_panic`, `unclean_exit` or `solver_error`.
     pub kind: String,
     /// When it first happened (UTC).
     pub time: String,
@@ -156,6 +160,75 @@ pub fn default_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(d));
     }
     fieldcraft_io::recovery::data_dir().map(|d| d.join("crashes"))
+}
+
+/// A small local diagnostic for an ordinary solver failure, without a model, replay,
+/// backtrace or startup crash announcement. Parameters and context are bounded independently;
+/// repeated failures update one record. Failure to persist never changes the solver outcome.
+pub(crate) fn solver_error(dir: &Path, command: &str, params: &Value, context: &Value, error: &str) -> Option<PathBuf> {
+    static WRITING: Mutex<()> = Mutex::new(());
+    static WRITTEN: AtomicUsize = AtomicUsize::new(0);
+    let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let t = now();
+    prune(dir, t);
+    // A different step/request/backend is not a repeat of the same failed solve. Keep exact
+    // parameters in the location key: crash signatures otherwise intentionally ignore digits.
+    let key_params = bounded_json(params, MAX_PARAMS_BYTES).unwrap_or_else(|| "<oversized>".into());
+    let key_backend = json!([
+        context.pointer("/backend/actual"),
+        context.pointer("/backend/observed_context/backend"),
+        context.pointer("/backend/observed_context/adapter")
+    ]);
+    let sig = signature(&format!("solver_error:{command}:{key_params}:{key_backend}"), error);
+    let previous = list(dir).into_iter().find(|s| s.kind == "solver_error" && sig_of(&s.id) == Some(sig));
+    if previous.is_none() && WRITTEN.load(Ordering::Relaxed) >= MAX_NEW_PER_SESSION {
+        return None;
+    }
+    let id = previous.as_ref().map(|s| s.id.clone()).unwrap_or_else(|| format!("{}-{sig:016x}", stamp(t)));
+    let folder = dir.join(&id);
+    let bounded = |v: &Value, limit| bounded_json(v, limit).and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let parameters = bounded(params, MAX_PARAMS_BYTES);
+    let solve = bounded(context, 64 << 10);
+    let environment = STATE
+        .get()
+        .and_then(|s| s.journal.lock().ok().and_then(|j| j.environment.clone()))
+        .and_then(|line| serde_json::from_str::<Value>(&line).ok())
+        .and_then(|v| v.get("environment").cloned());
+    let mut report = json!({
+        "format": "fieldcraft-diagnostic/1",
+        "id": id,
+        "kind": "solver_error",
+        "message": limited(error, MAX_MESSAGE),
+        "command": {"command": limited(command, 128), "params": parameters, "params_omitted": parameters.is_none().then_some("parameters exceed the 16 KiB record bound")},
+        "solve": solve,
+        "solve_omitted": solve.is_none().then_some("context exceeds the 64 KiB record bound"),
+        "app": {"version": Build::current().version_line()},
+        "system": {"os": std::env::consts::OS, "arch": std::env::consts::ARCH, "environment": environment},
+        "first_seen": previous.as_ref().map(|s| s.time.clone()).unwrap_or_else(|| utc(t)),
+        "last_seen": utc(t),
+        "count": previous.as_ref().map_or(1, |s| s.count.saturating_add(1)),
+    });
+    // Redact values, never serialized JSON: a Windows home path must not damage its escapes.
+    fn redact(v: &mut Value) {
+        match v {
+            Value::String(s) => *s = without_home(s),
+            Value::Array(a) => a.iter_mut().for_each(redact),
+            Value::Object(o) => o.values_mut().for_each(redact),
+            _ => {}
+        }
+    }
+    redact(&mut report);
+    let bytes = serde_json::to_vec_pretty(&report).ok()?;
+    fs::create_dir_all(&folder).ok()?;
+    let path = folder.join("report.json");
+    fieldcraft_io::fs::write_atomic(&path, &bytes, false).ok()?;
+    if previous.is_none() {
+        WRITTEN.fetch_add(1, Ordering::Relaxed);
+    }
+    prune(dir, t);
+    // A full budget of real crash reports takes precedence over this ordinary stop. Do not
+    // announce a report that pruning immediately discarded.
+    path.is_file().then_some(path)
 }
 
 fn now() -> u64 {
@@ -442,7 +515,7 @@ pub fn install(dir: PathBuf, build: Build) -> Vec<Summary> {
         let _ = f.take(64 << 10).read_to_string(&mut seen);
     }
     let all = list(&dir);
-    let fresh: Vec<Summary> = all.iter().filter(|s| !seen.lines().any(|l| l == s.id)).cloned().collect();
+    let fresh: Vec<Summary> = all.iter().filter(|s| s.kind != "solver_error" && !seen.lines().any(|l| l == s.id)).cloned().collect();
     let _ = fs::write(&seen_file, all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join("\n"));
     let known = all.into_iter().filter_map(|s| sig_of(&s.id).map(|sig| (sig, (0, s.id)))).collect();
     let journal = Journal::open(&dir, &build, started);
@@ -1294,10 +1367,10 @@ fn report_ids(dir: &Path) -> Vec<String> {
     v
 }
 
-/// Keep the reports within the limits: drop expired ones, then recovered panics, then the
-/// oldest, until at most [`MAX_REPORTS`] and [`MAX_TOTAL_BYTES`] remain.
+/// Keep reports within the limits: drop expired ones, then ordinary solver diagnostics, then
+/// recovered panics, then the oldest crash, until [`MAX_REPORTS`] and [`MAX_TOTAL_BYTES`] hold.
 pub fn prune(dir: &Path, now_secs: u64) {
-    let mut keep: Vec<(String, bool, u64)> = Vec::new();
+    let mut keep: Vec<(String, u8, u64)> = Vec::new();
     for id in report_ids(dir) {
         let folder = dir.join(&id);
         let t = report_time(dir, &id);
@@ -1305,13 +1378,16 @@ pub fn prune(dir: &Path, now_secs: u64) {
             let _ = fs::remove_dir_all(&folder);
             continue;
         }
-        let recovered =
-            read_report_file(&folder.join("report.json")).is_some_and(|v| v.get("kind").and_then(Value::as_str) == Some("recovered_panic"));
-        keep.push((id, recovered, folder_bytes(&folder)));
+        let priority = match read_report_file(&folder.join("report.json")).as_ref().and_then(|v| v.get("kind")).and_then(Value::as_str) {
+            Some("solver_error") => 0,
+            Some("recovered_panic") => 1,
+            _ => 2,
+        };
+        keep.push((id, priority, folder_bytes(&folder)));
     }
-    let over = |k: &[(String, bool, u64)]| k.len() > MAX_REPORTS || k.iter().map(|e| e.2).sum::<u64>() > MAX_TOTAL_BYTES;
+    let over = |k: &[(String, u8, u64)]| k.len() > MAX_REPORTS || k.iter().map(|e| e.2).sum::<u64>() > MAX_TOTAL_BYTES;
     while over(&keep) {
-        let i = keep.iter().position(|e| e.1).unwrap_or(0);
+        let i = keep.iter().enumerate().min_by_key(|(_, e)| e.1).map_or(0, |(i, _)| i);
         if i >= keep.len() {
             break;
         }

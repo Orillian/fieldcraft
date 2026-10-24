@@ -15,6 +15,23 @@ fn node(label: u32) -> Value {
     json!({"label": label, "xyz": [f64::from(label), 0.0, 0.0]})
 }
 
+/// Original 8 x 8 x 1 box: test stop/report semantics without a large sample or CAD.
+fn diagnostic_flow(s: &mut Session) {
+    s.execute("file.new", &json!({})).unwrap();
+    s.execute("model.units", &json!({"system": "m-kg-s-N-Pa"})).unwrap();
+    s.execute("model.material.create", &json!({"name": "Fluid", "density": 1, "fluid": {"type": "newtonian", "viscosity": 0.1}})).unwrap();
+    s.execute("model.fluid_domain.create", &json!({"name": "Wind", "material": "Fluid", "min": [0,0,0], "max": [1,1,0.125], "spacing": 0.125,
+        "faces": {"x_min": {"type": "velocity", "velocity": [0.1,0,0]}, "x_max": {"type": "pressure", "pressure": 0}, "z_min": {"type": "periodic"}, "z_max": {"type": "periodic"}}})).unwrap();
+    s.execute("model.step.create", &json!({"name": "Flow", "procedure": {"type": "fluid", "domain": "Wind", "end_time": 0.01, "time_step": 0.001, "frames": 1, "steady": {"window": 1, "min_time": 20}}})).unwrap();
+}
+
+/// The cantilever with its clamp left out of its static step: the solve fails, singular (a
+/// solver failure, not a refusal of the request).
+fn unclamped(s: &mut Session) {
+    s.execute("file.sample", &json!({"name": "cantilever"})).unwrap();
+    s.execute("model.step.edit", &json!({"name": "Load", "boundary_conditions": []})).unwrap();
+}
+
 /// The child half of the process tests: does nothing unless a parent asks, then installs the
 /// hook and crashes the way `FIELDCRAFT_CRASH_CHILD` says.
 #[test]
@@ -23,6 +40,27 @@ fn child() {
         return;
     };
     let dir = PathBuf::from(dir);
+    if mode == "solver_full_crash_budget" {
+        let mut s = Session { solver_diagnostics: Some(dir.clone()), ..Default::default() };
+        unclamped(&mut s);
+        let error = s.execute("solve.static", &json!({"step": "Load"})).unwrap_err();
+        assert!(matches!(error, EngineError::Solver(fieldcraft_solver::Error::Singular(_))), "{error}");
+        assert_eq!(s.take_solver_diagnostic(), None, "a record the budget discarded is not announced");
+        assert_eq!(list(&dir).len(), MAX_REPORTS);
+        assert!(list(&dir).iter().all(|r| r.kind == "recovered_panic"));
+        return;
+    }
+    if mode == "solver_write_failure" {
+        let mut s = Session { solver_diagnostics: Some(dir.clone()), ..Default::default() };
+        unclamped(&mut s);
+        let e = s.execute("solve.static", &json!({"step": "Load"})).unwrap_err();
+        assert!(matches!(e, EngineError::Solver(fieldcraft_solver::Error::Singular(_))), "{e}");
+        assert_eq!(s.take_solver_diagnostic(), None);
+        return;
+    }
+    if mode == "solver_error" {
+        solver_error(&dir, "solve.fluid", &json!({"max_cells": 1}), &json!({"cells": 8}), "limit reached: 8 cells").unwrap();
+    }
     if mode == "replay" {
         // Replay the one report (in a process of its own: the replay replaces the panic hook).
         let id = list(&dir)[0].id.clone();
@@ -33,7 +71,7 @@ fn child() {
     }
     let fresh = install(dir.clone(), build());
     println!("FRESH {}", serde_json::to_string(&fresh).unwrap());
-    if mode == "idle" {
+    if mode == "idle" || mode == "solver_error" {
         end_session();
         return;
     }
@@ -55,7 +93,8 @@ fn child() {
         }
         std::process::abort();
     }
-    let mut s = Session { crash_journal: true, ..Default::default() };
+    // As the app's own model: its commands journalled, its solver failures recorded.
+    let mut s = Session { crash_journal: true, solver_diagnostics: Some(dir.clone()), ..Default::default() };
     s.execute("mesh.node.add", &node(1)).unwrap();
     s.execute("mesh.node.add", &node(2)).unwrap();
     // Commands that only read are not kept.
@@ -63,6 +102,67 @@ fn child() {
         s.execute("model.info", &json!({})).unwrap();
     }
     match mode.as_str() {
+        "solver_multiple_steps" => {
+            diagnostic_flow(&mut s);
+            s.execute(
+                "model.step.create",
+                &json!({"name": "Second", "procedure": {"type": "fluid", "domain": "Wind", "end_time": 0.02, "time_step": 0.001, "frames": 1, "steady": {"window": 1, "min_time": 20}}}),
+            )
+            .unwrap();
+            s.execute(
+                "model.step.create",
+                &json!({"name": "Physical", "procedure": {"type": "fluid", "domain": "Wind", "end_time": 0.03, "time_step": 0.001, "frames": 1}}),
+            )
+            .unwrap();
+            let result = s.execute("solve.run", &json!({})).unwrap();
+            assert!(result["steps"][0]["summary"]["diagnostic_report"].is_string());
+            assert!(result["steps"][1]["summary"]["diagnostic_report"].is_string());
+            assert!(result["steps"][2]["summary"].get("diagnostic_report").is_none());
+            println!("MULTISTEP {}", result);
+        }
+        "solver_steady_cap" => {
+            diagnostic_flow(&mut s);
+            let capped = s.execute("solve.fluid", &json!({"step": "Flow", "backend": "cpu"})).unwrap();
+            assert_eq!(capped["stop"]["reason"], "max_time");
+            assert!(capped["diagnostic_report"].is_string());
+            s.execute(
+                "model.step.edit",
+                &json!({"name": "Flow", "procedure": {"type": "fluid", "domain": "Wind", "end_time": 0.01, "time_step": 0.001, "frames": 1}}),
+            )
+            .unwrap();
+            let physical = s.execute("solve.fluid", &json!({"step": "Flow", "backend": "cpu"})).unwrap();
+            assert!(physical.get("diagnostic_report").is_none());
+            println!("TRANSIENT {}", json!({"steady": capped["stop"]["reason"], "cells": capped["cells"], "physical_end": physical["end_time"]}));
+        }
+        "solver_failure" => {
+            unclamped(&mut s);
+            let e = s.execute("solve.static", &json!({"step": "Load"})).unwrap_err();
+            // The error is the solver's own, its message first and unchanged.
+            assert!(matches!(e, EngineError::Solver(fieldcraft_solver::Error::Singular(_))), "{e}");
+            let report = s.take_solver_diagnostic().unwrap();
+            assert!(report.starts_with(&dir) && report.is_file(), "{}", report.display());
+            assert_eq!(s.take_solver_diagnostic(), None, "taken once");
+            println!("SOLVE {}", json!({"error": e.to_string(), "nodes": s.model.nodes().len()}));
+        }
+        "solver_missing_backend" => {
+            diagnostic_flow(&mut s);
+            let e = s.execute("solve.fluid", &json!({"step": "Flow", "backend": "gpu"})).unwrap_err();
+            assert!(matches!(e, EngineError::Fluid(fieldcraft_lbm::Error::Backend(_))), "{e}");
+        }
+        "solver_not_failure" => {
+            // Refusals of the request: a work cap and a step that does not exist.
+            s.execute("file.sample", &json!({"name": "cantilever"})).unwrap();
+            let e = s.execute("solve.static", &json!({"step": "Load", "max_dofs": 1})).unwrap_err();
+            assert!(matches!(e, EngineError::Solver(fieldcraft_solver::Error::Limit(_))), "{e}");
+            assert!(s.execute("solve.static", &json!({"max_dofs": 0})).is_err());
+            assert!(s.execute("solve.run", &json!({"max_dofs": 1})).is_err());
+            let progress = fieldcraft_model::progress::Progress::new();
+            progress.cancel();
+            unclamped(&mut s);
+            let e = fieldcraft_model::progress::scoped(Some(progress), || s.execute("solve.static", &json!({"step": "Load"}))).unwrap_err();
+            assert!(e.is_cancelled());
+            assert_eq!(s.take_solver_diagnostic(), None);
+        }
         "command" => {
             for _ in 0..3 {
                 let r = s.execute("diagnostics.crash_test", &json!({"mode": "panic"}));
@@ -128,6 +228,135 @@ fn nodes_in(model: &str) -> usize {
     let mut s = Session::default();
     s.execute("file.open", &json!({"path": model})).unwrap();
     s.model.nodes().len()
+}
+
+#[test]
+fn ordinary_solver_records_are_readable_without_a_startup_crash_prompt() {
+    let d = fresh_dir("solver_error");
+    let (out, ok) = run_child(&d, "solver_error");
+    assert!(ok, "{out}");
+    assert_eq!(printed(&out, "FRESH "), json!([]));
+    let (summary, report) = only_report(&d);
+    assert_eq!(summary.kind, "solver_error");
+    assert!(!summary.replayable);
+    assert_eq!(report["solve"]["cells"], 8);
+    assert_eq!(report["command"]["params"]["max_cells"], 1);
+    assert!(!d.join(&summary.id).join(MODEL_FILE).exists());
+    let path = solver_error(&d, "solve.fluid", &json!({"max_cells": 1}), &json!({"cells": 16}), "limit reached: 16 cells").unwrap();
+    assert_eq!(path, d.join(&summary.id).join("report.json"));
+    assert_eq!(read(&d, &summary.id).unwrap()["count"], 2);
+    assert_eq!(read(&d, &summary.id).unwrap()["solve"]["cells"], 16);
+    let other = solver_error(&d, "solve.fluid", &json!({"step": "Other", "max_cells": 1}), &json!({"cells": 16}), "limit reached: 16 cells").unwrap();
+    assert_ne!(other, path, "a different step is not a repeat of this failed solve");
+    let _ = fs::remove_dir_all(d);
+}
+
+#[test]
+fn solver_record_redaction_preserves_json_escapes_and_bounds_large_fields() {
+    let d = fresh_dir("solver_redaction");
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| "/example/home".into());
+    let input = format!("{home}\\study\\input.json");
+    let path = solver_error(&d, "solve.static", &json!({"input": input}), &json!({}), "solver redaction test").unwrap();
+    let report: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let expected = if home.len() > 1 && (std::env::var_os("HOME").is_some() || std::env::var_os("USERPROFILE").is_some()) {
+        "~\\study\\input.json".to_string()
+    } else {
+        input
+    };
+    assert_eq!(report["command"]["params"]["input"], expected);
+    let path = solver_error(
+        &d,
+        "solve.static",
+        &json!({"large": "x".repeat(20 << 10)}),
+        &json!({"large": "x".repeat(70 << 10)}),
+        "oversized solver record test",
+    )
+    .unwrap();
+    let report: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert!(report["command"]["params"].is_null());
+    assert!(report["command"]["params_omitted"].as_str().unwrap().contains("16 KiB"));
+    assert!(report["solve"].is_null());
+    assert!(report["solve_omitted"].as_str().unwrap().contains("64 KiB"));
+    let _ = fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_solver_failure_records_its_command_and_keeps_its_error() {
+    let d = fresh_dir("solver_failure");
+    let (out, ok) = run_child(&d, "solver_failure");
+    assert!(ok, "{out}");
+    let outcome = printed(&out, "SOLVE ");
+    assert!(!outcome["error"].as_str().unwrap().contains("solver diagnostic"));
+    assert_eq!(outcome["nodes"], 315);
+    let (_, report) = only_report(&d);
+    assert_eq!(report["kind"], "solver_error");
+    assert_eq!(report["command"]["command"], "solve.static");
+    assert_eq!(report["message"], outcome["error"]);
+    assert_eq!(report["solve"]["requested_step"], "Load");
+    assert_eq!(report["solve"]["backend"]["actual"], "cpu");
+    assert!(report["solve"]["checkpoint_path"].is_null());
+    let _ = fs::remove_dir_all(d);
+}
+
+#[test]
+fn refusals_and_cancellation_do_not_create_solver_records() {
+    let d = fresh_dir("solver_not_failure");
+    let (out, ok) = run_child(&d, "solver_not_failure");
+    assert!(ok, "{out}");
+    assert!(list(&d).is_empty());
+    let _ = fs::remove_dir_all(d);
+}
+
+#[test]
+fn an_unavailable_backend_is_recorded_without_opening_a_device() {
+    let d = fresh_dir("solver_missing_backend");
+    let (out, ok) = run_child(&d, "solver_missing_backend");
+    assert!(ok, "{out}");
+    let (_, report) = only_report(&d);
+    assert_eq!(report["solve"]["backend"]["requested"], "gpu");
+    assert!(report["solve"]["backend"]["actual"].is_null());
+    assert!(report["solve"]["backend"]["observed_context"].is_null());
+    assert!(report["message"].as_str().unwrap().contains("no GPU backend"));
+    let _ = fs::remove_dir_all(d);
+}
+
+#[test]
+fn diagnostic_write_failure_does_not_replace_the_original_solver_error() {
+    let d = fresh_dir("solver_write_failure");
+    fs::write(&d, b"not a directory").unwrap();
+    let (out, ok) = run_child(&d, "solver_write_failure");
+    assert!(ok, "{out}");
+    assert!(d.is_file());
+    let _ = fs::remove_file(d);
+}
+
+#[test]
+fn a_steady_cap_is_diagnostic_but_a_requested_physical_end_time_is_success() {
+    let d = fresh_dir("solver_steady_cap");
+    let (out, ok) = run_child(&d, "solver_steady_cap");
+    assert!(ok, "{out}");
+    assert_eq!(printed(&out, "TRANSIENT ")["steady"], "max_time");
+    let (_, report) = only_report(&d);
+    assert_eq!(report["solve"]["model"]["cells"], printed(&out, "TRANSIENT ")["cells"]);
+    let _ = fs::remove_dir_all(d);
+}
+
+#[test]
+fn an_earlier_steady_cap_is_recorded_at_its_own_child_boundary() {
+    let d = fresh_dir("solver_multiple_steps");
+    let (out, ok) = run_child(&d, "solver_multiple_steps");
+    assert!(ok, "{out}");
+    let result = printed(&out, "MULTISTEP ");
+    let reports = list(&d);
+    assert_eq!(reports.len(), 2);
+    for (index, step) in ["Flow", "Second"].into_iter().enumerate() {
+        let report = reports.iter().map(|r| read(&d, &r.id).unwrap()).find(|r| r["solve"]["requested_step"] == step).unwrap();
+        assert_eq!(report["command"]["command"], "solve.fluid");
+        assert_eq!(report["solve"]["parent_command"], "solve.run");
+        assert_eq!(report["solve"]["summary"]["end_time"], result["steps"][index]["summary"]["end_time"]);
+        assert_ne!(report["solve"]["summary"]["end_time"], result["steps"][2]["summary"]["end_time"]);
+    }
+    let _ = fs::remove_dir_all(d);
 }
 
 #[test]
@@ -292,6 +521,38 @@ fn reports_are_pruned_to_the_limits() {
     assert!(left.iter().all(|r| r.kind == "panic"), "recovered ones go first");
     assert_eq!(clear(&d, None), MAX_REPORTS);
     let _ = fs::remove_dir_all(&d);
+}
+
+#[test]
+fn ordinary_solver_reports_never_evict_a_full_crash_budget() {
+    let d = fresh_dir("solver_full_crash_budget");
+    for i in 0..MAX_REPORTS {
+        let id = format!("20261014-1000{:02}-{:016x}", i % 60, i + 1);
+        fs::create_dir_all(d.join(&id)).unwrap();
+        fs::write(d.join(&id).join("report.json"), json!({"kind": "recovered_panic", "message": "m"}).to_string()).unwrap();
+    }
+    let (out, ok) = run_child(&d, "solver_full_crash_budget");
+    assert!(ok, "{out}");
+    assert_eq!(clear(&d, None), MAX_REPORTS);
+    let _ = fs::remove_dir_all(d);
+}
+
+#[test]
+fn solver_reports_are_evicted_before_crashes_when_the_byte_budget_is_full() {
+    let d = fresh_dir("solver_byte_budget");
+    let crash = d.join("20261014-100001-0000000000000001");
+    let solver = d.join("20261014-100002-0000000000000002");
+    for (folder, kind) in [(&crash, "recovered_panic"), (&solver, "solver_error")] {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("report.json"), json!({"kind": kind, "message": "m"}).to_string()).unwrap();
+    }
+    // Sparse files exercise the 100 MB policy without allocating/writing a large fixture.
+    fs::File::create(crash.join("model.fieldcraft")).unwrap().set_len(MAX_TOTAL_BYTES - 1024).unwrap();
+    fs::File::create(solver.join("padding")).unwrap().set_len(2048).unwrap();
+    prune(&d, now());
+    assert!(crash.join("report.json").is_file());
+    assert!(!solver.exists());
+    let _ = fs::remove_dir_all(d);
 }
 
 #[test]

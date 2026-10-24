@@ -34,6 +34,7 @@ pub mod requirement;
 pub mod results;
 pub mod sample;
 pub mod schema;
+mod solver_diagnostic;
 pub mod units;
 pub mod usage;
 pub mod view;
@@ -402,6 +403,12 @@ pub struct Session {
     /// This is the app's own model: its top-level commands go into the crash journal
     /// ([`crash`]), so an unclean exit can be replayed. Off for scratch sessions and tests.
     pub crash_journal: bool,
+    /// The folder ordinary solver failures are recorded in ([`solver_diagnostic`]): set by a
+    /// host (the app, the CLI, the MCP server) for its own model, usually to
+    /// [`crash::default_dir`]; `None` (scratch sessions, libraries, tests) records nothing.
+    pub solver_diagnostics: Option<std::path::PathBuf>,
+    /// The latest solver diagnostic written ([`Session::take_solver_diagnostic`]).
+    solver_diagnostic: Option<std::path::PathBuf>,
     /// Where this session's commands come from, for the usage analytics ([`usage`]): the app
     /// sets it on its own model (and the control channel and the command search while they
     /// run); `None` (scratch sessions, the CLI, tests) counts nothing.
@@ -426,11 +433,21 @@ impl Session {
         let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.chars().take(100).collect()))?;
         let timer = usage::Timer::start(self.origin);
         let elements = self.model.elements().len();
-        let result = self
-            .availability(spec)
-            .map_err(EngineError::Unavailable)
-            .and_then(|()| check_keys(spec, params))
-            .and_then(|()| self.run_command(spec, params));
+        let progress = solver_diagnostic::is_solve(id).then(|| {
+            let p = fieldcraft_model::progress::current().unwrap_or_default();
+            p.begin_command();
+            let before = p.observations();
+            (p, before)
+        });
+        let result =
+            self.availability(spec).map_err(EngineError::Unavailable).and_then(|()| check_keys(spec, params)).and_then(|()| match &progress {
+                Some((p, _)) => fieldcraft_model::progress::scoped(Some(p.clone()), || self.run_command(spec, params)),
+                None => self.run_command(spec, params),
+            });
+        let result = match progress {
+            Some((p, before)) => solver_diagnostic::finish(self, id, params, &p, before, None, result),
+            None => result,
+        };
         if timer.counting() {
             let milestone = usage::milestone(spec.id, (elements, self.model.elements().len()));
             let sample =
@@ -824,6 +841,12 @@ impl Session {
         }
     }
 
+    /// The path of the latest solver diagnostic written since the last call
+    /// ([`solver_diagnostic`]): for a host to show beside a command's error or result.
+    pub fn take_solver_diagnostic(&mut self) -> Option<std::path::PathBuf> {
+        self.solver_diagnostic.take()
+    }
+
     /// Ask the hosts to aim their camera as `aim` says (a saved view shown): it becomes the
     /// session's camera and [`Session::camera_requests`] counts one more.
     pub fn request_camera(&mut self, aim: view::Aim) {
@@ -839,6 +862,7 @@ impl Session {
             limits: self.limits,
             file_access: self.file_access.clone(),
             crash_journal: self.crash_journal,
+            solver_diagnostics: self.solver_diagnostics.clone(),
             origin: self.origin,
             default_units: self.default_units.clone(),
             camera_requests: self.camera_requests,

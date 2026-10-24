@@ -316,6 +316,8 @@ fn main() -> eframe::Result {
             let mut session = Session::default();
             // The window's model: its commands go into the crash journal.
             session.crash_journal = crash::enabled();
+            // Ordinary solver failures are recorded beside the crash reports (docs/crash-reports.md).
+            session.solver_diagnostics = crash::enabled().then(crash::default_dir).flatten();
             let mut app = ModelApp::new(session).with_services(services());
             // Anonymous usage: asked once, recorded only when the user agreed (docs/privacy.md).
             let usage = match usage::host(args.control.is_some()) {
