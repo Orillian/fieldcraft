@@ -2397,6 +2397,14 @@ pub const SOLVE_FLUID: &[Field] = &[
         .help("Cap on the memory for result frames (about 16 bytes per cell per frame, 20 with heat): 2 GB by default; may be raised up to this machine's bound (the estimate below).")
         .hint("2000000000"),
     THREADS,
+    path("checkpoint", "CPU restart file", true)
+        .help("Optional native CPU checkpoint destination. Saves complete restart state, distinct from the display results in a model file; kept after success or cancellation.")
+        .hint("disabled unless a path is supplied"),
+    int("checkpoint_every", "Save every steps", 1, 10_000_000)
+        .help("Required with a CPU restart file, including on resume: save every N lattice steps and at a sound final stop. Choose for the run size and storage cost; cadence may change on resume.")
+        .hint("required with a restart file"),
+    flag("resume", "Resume CPU restart")
+        .help("Restore the explicit restart file using the same model, geometry and CPU settings. Thread count and checkpoint cadence may change. GPU and browser restart are not supported yet."),
     flag("estimate", "Estimate only").help("Return the run's memory estimate without solving."),
 ];
 pub const SOLVE_PROBE: &[Field] = &[
