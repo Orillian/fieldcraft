@@ -127,6 +127,16 @@ Delaunay methods with Voronoi/ODT improvement, then (2) all-hex and hex-dominant
 
 ---
 
+**A0.6 Edge winding of a finished mesh (implemented in `fieldcraft-mesh::tet::winding`).** **Verdict: BUILD ON.**
+- **Hormann and Agathos 2001.** K. Hormann, A. Agathos. *The Point in Polygon Problem for Arbitrary Polygons.*
+  Computational Geometry 20(3):131–144, 2001. DOI [10.1016/S0925-7721(01)00012-8](https://doi.org/10.1016/S0925-7721(01)00012-8).
+  The winding number of a closed polygon about a point is the signed count of its edges that cross a ray from it, each
+  edge counted on a half-open interval. Round a tetrahedral mesh's edge, the link of positive tetrahedra is such a
+  polygon (each tetrahedron one step of less than half a turn); the gate counts the steps that cross the half-plane
+  through one link vertex with exact `orient3d` signs (A0.1): one for an interior edge, none for a boundary edge.
+
+---
+
 ### A1. Delaunay construction
 
 **A1.1 Bowyer 1981 / Watson 1981, incremental cavity insertion.** **Verdict: build on.**

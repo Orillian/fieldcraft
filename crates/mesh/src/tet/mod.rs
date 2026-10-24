@@ -42,6 +42,7 @@ pub mod ops;
 pub mod quadratic;
 pub mod refine;
 pub mod smooth;
+mod winding;
 
 #[cfg(test)]
 mod tests;
@@ -794,8 +795,10 @@ pub fn raw_mesh(surface: &BoundarySurface, cdt: &TetMesh) -> Result<QualityMesh>
 /// The validity gate of a linear mesh: every tetrahedron admissible, joined to the others by a
 /// face (when there are several), no face held by more than two, no part of the mesh joined to
 /// the rest by an edge or a vertex alone ([`pinches`]), the faces listed as `boundary`
-/// exactly those held by one, and the volume equal to what the boundary encloses within 1e-9
-/// (no overlap, no gap).
+/// exactly those held by one, and the volume equal to what the boundary encloses within 1e-9.
+/// The tetrahedra round each interior edge wind about it exactly once, and less than once round
+/// each boundary edge ([`winding`], exact): this catches a star that overlaps itself round an
+/// edge, not every intersection between unrelated parts of a mesh.
 pub fn linear_gate(points: &[[f64; 3]], tets: &[[u32; 4]], boundary: &[TaggedFace], boundary_volume: f64) -> Result<GateReport> {
     let count = face_use(tets);
     // A mesh folded over itself: the volume check misses it when the fold is consistently
@@ -864,5 +867,14 @@ pub fn linear_gate(points: &[[f64; 3]], tets: &[[u32; 4]], boundary: &[TaggedFac
         Ok([p(t[0])?, p(t[1])?, p(t[2])?, p(t[3])?])
     };
     let elements = tets.iter().enumerate().map(|(i, t)| Ok((i as u32 + 1, ElementKind::Tet4, coords(t)?))).collect::<Result<Vec<_>>>()?;
-    validity_gate_elements(elements, &GateOptions { expected_volume: Some(boundary_volume), volume_tolerance: crate::quality::VOLUME_TOLERANCE })
+    let report = validity_gate_elements(
+        elements,
+        &GateOptions { expected_volume: Some(boundary_volume), volume_tolerance: crate::quality::VOLUME_TOLERANCE },
+    )?;
+    // The winding count needs every tetrahedron positive: a report that failed is returned as it
+    // is, and the caller turns it into an error.
+    if report.passed() {
+        winding::check(points, tets)?;
+    }
+    Ok(report)
 }
