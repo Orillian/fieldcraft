@@ -68,6 +68,16 @@ impl Bounds {
         point.iter().enumerate().all(|(k, p)| p.is_finite() && *p >= self.min[k] && *p <= self.max[k])
     }
 
+    /// Candidate queries admit the same scale-relative roundoff band as the inverse map's
+    /// reference-domain test. This does not alter the stored conservative enclosure. It
+    /// prevents arc-length/units arithmetic at an exterior face from dropping a boundary
+    /// station before Newton can validate its residual and natural coordinates.
+    pub fn contains_near(self, point: [f64; 3]) -> bool {
+        let span = (0..3).map(|k| self.max[k] - self.min[k]).fold(0.0, f64::max);
+        let tolerance = if span.is_finite() { INSIDE * span } else { 0.0 };
+        point.iter().enumerate().all(|(k, p)| p.is_finite() && *p >= self.min[k] - tolerance && *p <= self.max[k] + tolerance)
+    }
+
     /// Min/max selection introduces no floating-point arithmetic or inward rounding.
     pub fn union(self, other: Self) -> Self {
         Self { min: [0, 1, 2].map(|k| self.min[k].min(other.min[k])), max: [0, 1, 2].map(|k| self.max[k].max(other.max[k])) }
@@ -82,12 +92,22 @@ pub struct Location {
 }
 
 impl Location {
-    /// Undefined nodal data stays undefined. No nearest-node substitution or renormalization.
+    /// Undefined contributing nodal data stays undefined. Exact zero weights do not use a
+    /// missing value (so a defined value at an exact node/face remains defined). No nearest-
+    /// node substitution or renormalization is performed.
     pub fn interpolate(self, values: &[f64]) -> Option<f64> {
-        if values.len() != self.shape.count || values.iter().any(|v| !v.is_finite()) {
+        if values.len() != self.shape.count {
             return None;
         }
-        let value = self.shape.values().iter().zip(values).map(|(n, v)| n * v).sum::<f64>();
+        let mut value = 0.0;
+        for (n, v) in self.shape.values().iter().zip(values) {
+            if *n != 0.0 {
+                if !v.is_finite() {
+                    return None;
+                }
+                value += n * v;
+            }
+        }
         value.is_finite().then_some(value)
     }
 }
@@ -176,7 +196,7 @@ pub fn locate(kind: ElementKind, xyz: &[[f64; 3]], point: [f64; 3], work: &mut W
     }
     // Debit before any bounds evaluation, including queries outside the enclosure.
     work.spend_many(if kind == ElementKind::Hex20 { 28 } else { 1 })?;
-    if !bounds(kind, xyz)?.contains(point) {
+    if !bounds(kind, xyz)?.contains_near(point) {
         return Ok(None);
     }
     let origin = xyz.first().copied().ok_or_else(|| Error::Invalid("empty path element".into()))?;

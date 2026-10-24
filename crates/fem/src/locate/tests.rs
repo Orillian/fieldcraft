@@ -162,6 +162,28 @@ fn bounds_cost_is_debited_before_any_basis_evaluation() {
 }
 
 #[test]
+fn candidate_roundoff_band_does_not_drop_exact_boundary_stations() {
+    let kind = ElementKind::Hex8;
+    let xyz: Vec<_> = Basis::of(kind).nodes().iter().map(|p| p.map(|v| (v + 1.0) * 0.0005)).collect();
+    let point = [-1e-19, 0.0005, 0.0005];
+    let enclosure = bounds(kind, &xyz).unwrap();
+    assert!(!enclosure.contains(point));
+    assert!(enclosure.contains_near(point));
+    assert!(locate(kind, &xyz, point, &mut Work::new(100)).unwrap().is_some());
+    assert!(locate(kind, &xyz, [-1e-8, 0.0005, 0.0005], &mut Work::new(100)).unwrap().is_none());
+}
+
+#[test]
+fn undefined_values_with_exact_zero_weights_do_not_erase_a_defined_node() {
+    let location = Location { natural: [0.0; 3], shape: Basis::Tet4.eval([0.0; 3]) };
+    assert_eq!(location.interpolate(&[4.0, f64::NAN, f64::NAN, f64::NAN]), Some(4.0));
+    assert!(location.interpolate(&[f64::NAN, 4.0, 4.0, 4.0]).is_none());
+    let face = Location { natural: [0.25, 0.25, 0.0], shape: Basis::Tet4.eval([0.25, 0.25, 0.0]) };
+    assert_eq!(face.interpolate(&[2.0, 4.0, 8.0, f64::NAN]), Some(4.0));
+    assert!(face.interpolate(&[2.0, f64::NAN, 8.0, f64::NAN]).is_none());
+}
+
+#[test]
 fn pyramid_apex_edges_faces_and_near_apex_are_not_a_cube_domain() {
     let kind = ElementKind::Pyramid5;
     let xyz: Vec<_> = Basis::of(kind).nodes().iter().map(|[r, s, t]| [2.0 + r + 0.1 * s, 3.0 + s, 4.0 + 2.0 * t]).collect();
