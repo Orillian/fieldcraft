@@ -60,6 +60,7 @@
 
 pub mod backend;
 pub mod bounce;
+pub mod checkpoint;
 pub mod conduction;
 pub mod flow;
 pub mod hrr;

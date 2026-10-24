@@ -179,6 +179,20 @@ impl WallNodes {
         WallNodes { nodes, nu }
     }
 
+    /// The restart state: none beyond the setup's. Each node's stress is sampled before its
+    /// collision and the momentum it takes is added to the saved forces within the step.
+    pub(crate) fn checkpoint(&mut self, a: &mut dyn crate::checkpoint::Archive) -> crate::Result<()> {
+        use crate::checkpoint::fixed;
+        fixed(a, self.nodes.len() as u64)?;
+        for w in &self.nodes {
+            let WallNode { cell, interior, axis, inward, group, stress: _, taken: _ } = *w;
+            for v in [u64::from(cell), u64::from(interior), u64::from(axis), inward as u64, u64::from(group)] {
+                fixed(a, v)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The boundary nodes, in cell order.
     pub fn nodes(&self) -> &[WallNode] {
         &self.nodes

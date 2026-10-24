@@ -1320,6 +1320,23 @@ impl Flow {
         total
     }
 
+    pub(crate) fn checkpoint_heap_bytes(&mut self) -> Result<u64> {
+        self.targets()?;
+        let mut bytes = self.heap_bytes();
+        bytes = bytes.saturating_add(
+            (self.forces.capacity() * size_of::<[f64; 3]>()
+                + self.actions.capacity() * size_of::<ZoneAction>()
+                + self.fan_rise.capacity() * size_of::<f64>()) as u64,
+        );
+        if let Some(t) = &self.thermal {
+            bytes = bytes.saturating_add((t.heat.capacity() * size_of::<f64>()) as u64);
+            if let Some(s) = &t.solid {
+                bytes = bytes.saturating_add(s.heap_bytes());
+            }
+        }
+        Ok(bytes)
+    }
+
     pub fn grid(&self) -> &Grid {
         &self.grid
     }
@@ -2546,6 +2563,216 @@ fn thermal_rule(g: &[f64], s: usize, groups: &[ThermalCondition], cell: usize, q
 }
 
 impl crate::backend::Backend for Flow {
+    fn checkpoint(&mut self, a: &mut dyn crate::checkpoint::Archive) -> Result<()> {
+        use crate::checkpoint::{boolean, doubles, f64, fixed, u64, vectors};
+        // Streaming targets are allocated once, not cloned into a separate snapshot.
+        self.targets()?;
+        // Every field is named here, without `..`: a new field does not compile until it is
+        // saved or said to be fixed by the setup or rebuilt in each step, and a saved one changes
+        // the layout tag in `crate::checkpoint`.
+        let Flow {
+            grid,
+            n,
+            stride,
+            fluid,
+            f,
+            g,
+            links,
+            open: _,
+            omega_plus,
+            omega_minus,
+            collision,
+            smagorinsky,
+            turbulent_prandtl,
+            vreman,
+            cell_nu_t,
+            eddy_ratio,
+            walls,
+            wall_model,
+            wall_bounce,
+            nodes,
+            bulk: _,
+            rheology,
+            clamps,
+            acceleration,
+            forces,
+            groups,
+            offset: _,
+            fluid_cells: _,
+            steps_done,
+            empty_obstacles: _,
+            thermal,
+            cell_force,
+            cell_u,
+            sigma,
+            // Each cell's velocity before the collision, rebuilt from `f` at the start of a step.
+            gradient_u: _,
+            dynamic,
+            sigma_stats,
+            periodic,
+            zones,
+            zone_cells: _,
+            zone_of: _,
+            actions,
+            fan_rise,
+            outlets,
+            block: _,
+            // Overwritten before use; its capacity is not state.
+            open_scratch: _,
+        } = self;
+        let n = *n;
+        fixed(a, n as u64)?;
+        fixed(a, *stride as u64)?;
+        for v in grid.cells {
+            fixed(a, v as u64)?;
+        }
+        for v in grid
+            .origin
+            .into_iter()
+            .chain([grid.spacing, *omega_plus, *omega_minus, *smagorinsky, *turbulent_prandtl, *vreman, *sigma])
+            .chain(*acceleration)
+        {
+            fixed(a, v.to_bits())?;
+        }
+        let collision = match collision {
+            Collision::Trt => 0,
+            Collision::Regularized => 1,
+            Collision::Mrt => 2,
+            Collision::Hrr => 3,
+        };
+        for flag in [collision, u64::from(*wall_model), u64::from(*wall_bounce), u64::from(*dynamic), u64::from(rheology.is_some())]
+            .into_iter()
+            .chain(periodic.map(u64::from))
+        {
+            fixed(a, flag)?;
+        }
+        for v in fluid.iter() {
+            fixed(a, u64::from(*v))?;
+        }
+        fixed(a, links.len() as u64)?;
+        for l in links.iter() {
+            fixed(a, l.cell as u64)?;
+            fixed(a, l.q as u64)?;
+            match l.rule {
+                Rule::Pull { from } => {
+                    fixed(a, 0)?;
+                    fixed(a, from as u64)?;
+                }
+                Rule::Bounce { group, du } => {
+                    fixed(a, 1)?;
+                    fixed(a, group as u64)?;
+                    fixed(a, du.to_bits())?;
+                }
+                Rule::Reflect { from, q, group } => {
+                    fixed(a, 2)?;
+                    fixed(a, from as u64)?;
+                    fixed(a, q as u64)?;
+                    fixed(a, group as u64)?;
+                }
+                Rule::Open => fixed(a, 3)?,
+            }
+        }
+        u64(a, steps_done)?;
+        let len = f.len();
+        doubles(a, f, len)?;
+        doubles(a, g, len)?;
+        let nt = cell_nu_t.len();
+        doubles(a, cell_nu_t, nt)?;
+        f64(a, eddy_ratio)?;
+        if *eddy_ratio < 0.0 || cell_nu_t.iter().any(|nu| *nu < 0.0) {
+            return Err(Error::Invalid("checkpoint eddy viscosity is negative".into()));
+        }
+        // The last collision's dynamic σ, reported at the end of the run.
+        let mut stats = sigma_stats.is_some();
+        boolean(a, &mut stats)?;
+        if stats != *dynamic {
+            return Err(Error::Invalid("checkpoint dynamic σ statistics differ from this flow".into()));
+        }
+        if stats {
+            let (mut least, mut mean) = sigma_stats.unwrap_or_default();
+            f64(a, &mut least)?;
+            f64(a, &mut mean)?;
+            *sigma_stats = Some((least, mean));
+        }
+        // The relaxation-time clamps of a shear-dependent fluid over the run.
+        for v in clamps.last.iter_mut().chain(clamps.total.iter_mut()).chain([&mut clamps.collisions]) {
+            u64(a, v)?;
+        }
+        if clamps.collisions > *steps_done {
+            return Err(Error::Invalid("checkpoint viscosity clamps count more collisions than steps".into()));
+        }
+        fixed(a, u64::from(walls.is_some()))?;
+        if let Some(w) = walls {
+            w.checkpoint(a)?;
+        }
+        fixed(a, u64::from(nodes.is_some()))?;
+        if let Some(w) = nodes {
+            w.checkpoint(a)?;
+        }
+        vectors(a, forces, groups.len())?;
+        let nf = cell_force.len();
+        vectors(a, cell_force, nf)?;
+        let nu = cell_u.len();
+        vectors(a, cell_u, nu)?;
+        doubles(a, fan_rise, zones.len())?;
+        for action in actions.iter_mut() {
+            for v in &mut action.push {
+                f64(a, v)?;
+            }
+            f64(a, &mut action.alpha)?;
+            f64(a, &mut action.beta)?;
+        }
+        outlets.checkpoint(a)?;
+        fixed(a, u64::from(thermal.is_some()))?;
+        if let Some(t) = thermal {
+            let ThermalState {
+                g,
+                g2,
+                temperature,
+                omega_plus,
+                omega_minus,
+                initial,
+                buoyancy,
+                groups: _,
+                open: _,
+                reset: _,
+                heat,
+                solid,
+                conjugate: _,
+                solid_finite,
+                phase,
+            } = t;
+            for v in [*omega_plus, *omega_minus, *initial].into_iter().chain(*buoyancy) {
+                fixed(a, v.to_bits())?;
+            }
+            let nt = g.len();
+            doubles(a, g, nt)?;
+            doubles(a, g2, nt)?;
+            doubles(a, temperature, n)?;
+            doubles(a, heat, groups.len())?;
+            boolean(a, solid_finite)?;
+            if !*solid_finite {
+                return Err(Error::Invalid("cannot resume a checkpoint with unstable solid temperatures".into()));
+            }
+            fixed(a, u64::from(solid.is_some()))?;
+            if let Some(s) = solid {
+                s.checkpoint(a)?;
+            }
+            // The liquid fractions of the last step, which the next collision's resistance reads.
+            fixed(a, u64::from(phase.is_some()))?;
+            if let Some(Phase { rule, liquid }) = phase {
+                for v in [rule.latent, rule.solidus, rule.liquidus] {
+                    fixed(a, v.to_bits())?;
+                }
+                doubles(a, liquid, n)?;
+                if liquid.iter().any(|f| !(0.0..=1.0).contains(f)) {
+                    return Err(Error::Invalid("checkpoint liquid fraction is outside 0 to 1".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn name(&self) -> String {
         "cpu".into()
     }

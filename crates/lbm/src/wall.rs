@@ -271,6 +271,40 @@ impl Walls {
         Ok(Walls { a_plus, nu, walls: found, wall_of, distance })
     }
 
+    /// The restart state: every wall cell's friction velocity of the last refresh, which the
+    /// solve's y⁺ report reads. Its other per-step values are rebuilt from the populations
+    /// before the collision reads them (the samples) or used up within the step (`removed`,
+    /// whose momentum is in the saved forces); the rest is fixed by the setup.
+    pub(crate) fn checkpoint(&mut self, a: &mut dyn crate::checkpoint::Archive) -> Result<()> {
+        use crate::checkpoint::{f64, fixed};
+        fixed(a, self.walls.len() as u64)?;
+        for w in &mut self.walls {
+            let WallCell {
+                cell,
+                link,
+                point: _,
+                normal: _,
+                distance,
+                velocity: _,
+                group,
+                removed: _,
+                friction,
+                second,
+                boundary: _,
+                rate: _,
+                stress: _,
+            } = w;
+            for v in [u64::from(*cell), u64::from(*link), distance.to_bits(), u64::from(*group), u64::from(*second)] {
+                fixed(a, v)?;
+            }
+            f64(a, friction)?;
+            if *friction < 0.0 {
+                return Err(crate::Error::Invalid("checkpoint wall friction velocity is negative".into()));
+            }
+        }
+        Ok(())
+    }
+
     /// The wall cells, in cell order: each one's cell, the direction of its nearest wall link,
     /// its distance to its wall (lattice units), its wall's velocity (lattice units) and the wall
     /// model's second cell, when there is one.
