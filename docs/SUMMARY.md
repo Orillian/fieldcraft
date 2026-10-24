@@ -8,6 +8,7 @@
 - [AI agents (MCP)](mcp.md)
 - [Units](units.md)
 - [Contact loading and unloading](recipes/contact-load-unload.md)
+- [Path plots](path-plots.md)
 - [FieldCraft in the browser](web.md)
 - [Updates](updates.md)
 - [Crash reports](crash-reports.md)

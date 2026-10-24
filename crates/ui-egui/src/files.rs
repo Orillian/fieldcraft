@@ -160,6 +160,7 @@ pub const BACKGROUND: &[&str] = &[
     "mesh.plan.apply",
     "mesh.cells",
     "geometry.partition",
+    "results.path",
 ];
 
 /// Most entries the recent-files list keeps, and the longest path it keeps.
@@ -497,9 +498,23 @@ pub(crate) fn off_thread(name: String, work: impl FnOnce() + Send + 'static) {
 /// A background job's work.
 type Work = Box<dyn FnOnce() + Send>;
 
-/// What a background job sends back: the session it ran on and the command's reply, with the
-/// session's display data when it succeeded.
-type Finished = (Box<Session>, Result<(Value, Box<Prebuilt>), String>);
+/// What a background job sends back: the command's reply and what it made, or why it failed.
+type Finished = Result<(Value, Product), String>;
+
+/// What a successful background job hands the window.
+enum Product {
+    /// The session the job ran on, which replaces the window's, with its display data.
+    Session(Box<Session>, Box<Prebuilt>),
+    /// A read-only query ([`reads_only`]) leaves the model as it was: only the path plot and its
+    /// search index come back, so the window keeps its session and its display.
+    PathPlot(Option<Arc<fieldcraft_engine::path::Plot>>, fieldcraft_engine::path::Cache),
+}
+
+/// Whether a background `command` only reads the model: its job returns the view state it made
+/// ([`Product::PathPlot`]) instead of a whole session.
+fn reads_only(command: &str) -> bool {
+    command == "results.path"
+}
 
 /// Start `work` on a worker thread. The web has no threads: the work comes back, to run on the
 /// window thread once the window has shown that it runs ([`Loading::shown`]).
@@ -536,9 +551,17 @@ fn spawn(
             let mut s = session;
             #[allow(clippy::disallowed_methods, reason = "the job's worker thread")]
             let r = fieldcraft_model::progress::scoped(Some(progress), || s.execute(command, &params)).map_err(|e| e.to_string());
-            // What the window draws of the new session is built here too, not in a frame.
-            let r = r.map(|v| (v, Box::new(Prebuilt::of(&s, &drawn))));
-            let _ = tx.send((Box::new(s), r));
+            let r = r.map(|v| {
+                if reads_only(command) {
+                    // The session copy is dropped here, on the worker, not in a frame.
+                    (v, Product::PathPlot(s.path_plot.take(), std::mem::take(&mut s.path_index)))
+                } else {
+                    // What the window draws of the new session is built here too, not in a frame.
+                    let prebuilt = Box::new(Prebuilt::of(&s, &drawn));
+                    (v, Product::Session(Box::new(s), prebuilt))
+                }
+            });
+            let _ = tx.send(r);
         }),
     );
     (rx, work)
@@ -778,8 +801,8 @@ impl ModelApp {
         };
         let Some(l) = self.loading.take() else { return false };
         let reply = match &outcome {
-            Some((_, Ok((v, _)))) => json!({"ok": true, "result": v}),
-            Some((_, Err(e))) => json!({"ok": false, "error": e}),
+            Some(Ok((v, _))) => json!({"ok": true, "result": v}),
+            Some(Err(e)) => json!({"ok": false, "error": e}),
             None => json!({"ok": false, "error": format!("{}: stopped unexpectedly", l.title)}),
         };
         for w in &l.waiters {
@@ -788,7 +811,17 @@ impl ModelApp {
         let took = elapsed(l.started.elapsed().as_secs_f64());
         let l = Loading { done: finished(l.command, &l.done, &took, &reply), ..l };
         match outcome {
-            Some((session, Ok((reply, prebuilt)))) => {
+            Some(Ok((reply, Product::PathPlot(plot, index)))) => {
+                self.session.path_plot = plot;
+                self.session.path_index = index;
+                self.restore_path_plot();
+                if self.dialog.as_ref().is_some_and(|d| l.form == Some(d.command)) {
+                    self.form_done();
+                }
+                let done = reply.get("path").and_then(Value::as_str).map_or(l.done, |p| format!("Wrote {}", file_name(p)));
+                self.set_status(done, false);
+            }
+            Some(Ok((reply, Product::Session(session, prebuilt)))) => {
                 let opened = Opened { command: l.command, session, prebuilt, reply, done: l.done, recent: l.recent, form: l.form };
                 // A design of another part over a meshed or defined model: ask what to do with
                 // the model before it changes (the job ran with the default, keep).
@@ -804,7 +837,7 @@ impl ModelApp {
                     _ => self.take_opened(opened),
                 }
             }
-            Some((_, Err(e))) => {
+            Some(Err(e)) => {
                 let what = l.recent.as_deref().map_or_else(|| l.title.clone(), file_name);
                 self.set_status(format!("{what}: {e}"), true);
                 if let Some(d) = self.dialog.as_mut().filter(|d| l.form == Some(d.command)) {
@@ -976,7 +1009,11 @@ impl ModelApp {
             return;
         };
         let part = |k: &str| params.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-        let what = if command == "results.xy" { "xy".to_string() } else { part("what") };
+        let what = match command {
+            "results.xy" => "xy".to_string(),
+            "results.path" => "path".to_string(),
+            _ => part("what"),
+        };
         let name = format!("{}-{}-{what}.csv", self.model_name(), part("step"));
         let Some(path) = pick(&name, &[Filter { name: "CSV", extensions: &["csv"] }]) else { return };
         let path = if Path::new(&path).extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("csv")) {
@@ -986,6 +1023,12 @@ impl ModelApp {
         };
         let mut params = params;
         params["path"] = json!(path);
+        if is_long(command) {
+            if let Err(e) = self.start_job(command, params) {
+                self.set_status(e, true);
+            }
+            return;
+        }
         if self.run(command, params).is_ok() {
             self.set_status(format!("Wrote {}", file_name(&path)), false);
         }
@@ -1042,6 +1085,7 @@ impl ModelApp {
             "diagnostics.crash_reports" | "diagnostics.crash_report" | "diagnostics.crash_reports.delete" => self.open_crash_reports(),
             "solve.run" => self.solve_all(),
             "results.xy" => self.open_xy(),
+            "results.path" => self.open_path_plot(),
             "deck.write" if can_save => match preset.get("format").and_then(Value::as_str) {
                 Some(f) => self.write_deck(f),
                 None => return false,

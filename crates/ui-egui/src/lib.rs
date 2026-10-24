@@ -46,6 +46,7 @@ pub mod menu;
 pub mod navigation;
 pub mod node_move;
 pub mod palette;
+pub mod path_panel;
 pub mod privacy;
 pub mod reply;
 pub mod report;
@@ -418,6 +419,8 @@ pub struct ModelApp {
     pub reactions: Option<Value>,
     /// The XY plot, while it is open in the results panel.
     pub xy: Option<XyPlot>,
+    /// Reference-coordinate path editor; numerical samples remain engine session state.
+    pub path_editor: Option<path_panel::Editor>,
     /// The last command reply with more to it than its status line, shown in the context panel.
     pub reply: Option<reply::Reply>,
     /// The Feature Graph rows opened to their details: (body, feature id).
@@ -572,6 +575,7 @@ impl ModelApp {
             shown_units: String::new(),
             reactions: None,
             xy: None,
+            path_editor: None,
             reply: None,
             features_open: Default::default(),
             results_shown: false,
@@ -724,6 +728,9 @@ impl ModelApp {
                 xy.y = Some(template);
                 xy.x = params.get("x").filter(|x| x.is_object()).cloned();
             }
+        }
+        if id == "results.path" && r.is_ok() {
+            self.restore_path_plot();
         }
         // What the duplicate check found is selected, so the viewport shows it (#234).
         if id == "mesh.check.duplicates"
@@ -2106,6 +2113,7 @@ impl ModelApp {
             self.probe = None;
             self.reactions = None;
             self.xy = None;
+            self.path_editor = None;
             self.reframe = framing::Reframe::merge(self.reframe, framing::Reframe::Home);
         }
     }
@@ -4031,6 +4039,29 @@ mod tests {
         app.run("mesh.node.add", json!({"label": 900000, "xyz": [0, 0, 0]})).unwrap();
         assert!(app.prebuilt.is_none(), "the model changed after the job");
         assert!(app.display().nodes.len() > adopted.nodes.len());
+    }
+
+    /// Sampling a path in the background only reads the model: the window keeps its session and
+    /// its display (no session copy replaces it, nothing is rebuilt) and takes just the plot.
+    #[test]
+    fn a_path_job_keeps_the_session() {
+        let mut session = Session::default();
+        session.run_script(&fieldcraft_engine::sample::cantilever()).unwrap();
+        session.execute("solve.static", &json!({"step": "Load"})).unwrap();
+        let mut app = ModelApp::new(session);
+        app.open_path_plot();
+        app.path_editor.as_mut().unwrap().points = vec![[0.02, 0.005, 0.02], [0.08, 0.005, 0.02]];
+        let _ = app.display();
+        let revision = app.revision;
+        let journal = app.session.journal.len();
+        app.sample_path().unwrap();
+        app.wait_loaded();
+        assert_eq!(app.revision, revision, "the model did not change");
+        assert_eq!(app.session.journal.len(), journal);
+        let plot = app.session.path_plot.clone().unwrap();
+        assert!(plot.current(&app.session));
+        assert_eq!(plot.values.len(), 101);
+        assert!(plot.values.iter().all(Option::is_some));
     }
 
     #[test]
