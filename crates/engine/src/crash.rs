@@ -260,10 +260,115 @@ fn bounded_json(v: &Value, limit: usize) -> Option<String> {
     String::from_utf8(w.0).ok()
 }
 
-/// The user's home folder in `s` shown as `~` (reports and drafts name no user folders).
+/// The user's home folder in `s` shown as `~` (reports and drafts name no user folders): both
+/// `HOME` and `USERPROFILE` (Git Bash and Cygwin set `HOME` beside the Windows profile), and the
+/// profile's 8.3 short name when `TEMP` or `TMP` reveals it.
 pub fn without_home(s: &str) -> String {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
-    if home.len() > 1 { s.replace(&home, "~") } else { s.to_string() }
+    let var = |k| std::env::var(k).unwrap_or_default();
+    let profile = var("USERPROFILE");
+    let mut homes: Vec<String> = ["TEMP", "TMP"].into_iter().filter_map(|t| short_home(&profile, &var(t))).collect();
+    homes.extend([var("HOME"), profile]);
+    replace_homes(s, &homes)
+}
+
+/// Every home in `homes` shown as `~` in `s`, the longest first (a home inside another one
+/// would otherwise leave the rest of the longer one behind).
+fn replace_homes(s: &str, homes: &[String]) -> String {
+    let mut homes: Vec<&str> = homes.iter().map(String::as_str).filter(|h| !h.is_empty()).collect();
+    homes.sort_by_key(|h| (std::cmp::Reverse(h.len()), *h));
+    homes.dedup();
+    homes.iter().fold(s.to_string(), |s, home| replace_home(&s, home))
+}
+
+/// The 8.3 short form of the Windows profile `home` (`C:\Users\ADAMSM~1` for
+/// `C:\Users\Adam Smith`) when the temporary folder `temp` is written with it, as Windows
+/// does for long or spaced user names. Reading it from the temporary folder needs no Windows
+/// call (`GetShortPathNameW` has no safe binding, and FieldCraft has no `unsafe`).
+fn short_home(home: &str, temp: &str) -> Option<String> {
+    let home = home.trim_end_matches(['/', '\\']);
+    let parent = home.get(..=home.rfind(['/', '\\'])?)?;
+    let name = home.get(parent.len()..)?;
+    let rest = temp.get(path_match(temp, parent, true)?..)?;
+    let short = rest.split(['/', '\\']).next()?;
+    let differs = path_match(short, name, true) != Some(short.len());
+    (short.contains('~') && differs).then(|| format!("{parent}{short}"))
+}
+
+/// `home` in `s` shown as `~` wherever a path boundary follows it (a separator, the end, or a
+/// character the folder name cannot hold), so the home `C:\Users\Al` leaves `C:\Users\Alice` alone. A
+/// Windows home (`C:\Users\Ada`) is also found with its backslashes doubled (`C:\\Users\\Ada`,
+/// as JSON and `{:?}` write it) and with forward slashes, in any case (Windows paths ignore it,
+/// for `JÖRG` and `Jörg` too). A home without a folder separator (`C:`, `/`) is left alone.
+fn replace_home(s: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    if !home.contains(['/', '\\']) {
+        return s.to_string();
+    }
+    let windows = home.contains('\\') || home.as_bytes().get(1) == Some(&b':');
+    if !windows {
+        return replace_path(s, home, false);
+    }
+    // The doubled form first: it contains the plain one.
+    let forms = [home.replace('\\', "\\\\"), home.to_string(), home.replace('\\', "/")];
+    forms.iter().fold(s.to_string(), |s, form| replace_path(&s, form, true))
+}
+
+/// Every `path` in `s` followed by a path boundary replaced with `~`. A `windows` path is
+/// compared ignoring (Unicode) case and ends where a Windows folder name cannot continue; a
+/// Unix one where a user name cannot.
+fn replace_path(s: &str, path: &str, windows: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let boundary = if windows { ends_windows_name } else { ends_unix_name };
+    while let Some(c) = rest.chars().next() {
+        match path_match(rest, path, windows).filter(|&n| n > 0 && rest.get(n..).is_some_and(boundary)) {
+            Some(n) => {
+                out.push('~');
+                rest = rest.get(n..).unwrap_or_default();
+            }
+            None => {
+                out.push(c);
+                rest = rest.get(c.len_utf8()..).unwrap_or_default();
+            }
+        }
+    }
+    out
+}
+
+/// The length in bytes of the start of `s` that is `path` (ignoring case when `ignore_case`),
+/// if `s` starts with it.
+fn path_match(s: &str, path: &str, ignore_case: bool) -> Option<usize> {
+    if !ignore_case {
+        return s.starts_with(path).then_some(path.len());
+    }
+    let mut want = path.chars().flat_map(char::to_lowercase).peekable();
+    for (i, c) in s.char_indices() {
+        if want.peek().is_none() {
+            return Some(i);
+        }
+        for l in c.to_lowercase() {
+            if want.next() != Some(l) {
+                return None;
+            }
+        }
+    }
+    want.peek().is_none().then_some(s.len())
+}
+
+/// Whether `s` starts where a path's folder name ends: at its end, a separator, or a character
+/// Windows allows in no file name (a quote, `:`, a line break, …).
+fn ends_windows_name(s: &str) -> bool {
+    s.chars().next().is_none_or(|c| matches!(c, '/' | '\\' | '"' | '<' | '>' | '|' | ':' | '*' | '?') || c.is_control())
+}
+
+/// Whether `s` starts where a Unix user name ends: at its end or any character a user name
+/// cannot hold (anything but ASCII letters, digits, `_`, `-` and `.`), so `'/home/ada'` and
+/// `/home/ada, aborting` are hidden and `/home/adam` is not. Dots count as the end of a
+/// sentence when no name character follows them (`/home/ada.` but not `/home/ada.old`).
+fn ends_unix_name(s: &str) -> bool {
+    let rest = s.trim_start_matches('.');
+    let dots = rest.len() < s.len();
+    rest.chars().next().is_none_or(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) && !(dots && c == '/'))
 }
 
 // ---------------------------------------------------------------------------------------------

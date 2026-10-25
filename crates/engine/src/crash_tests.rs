@@ -381,3 +381,62 @@ fn startup_steps_survive_a_rebase_and_running_ends_startup() {
     drop(j);
     let _ = fs::remove_dir_all(&d);
 }
+
+#[test]
+fn the_home_folder_is_hidden_in_every_form_it_is_written() {
+    // Linux and macOS: the plain path, case kept (those file systems mind it).
+    assert_eq!(replace_home("/home/ada/parts/a.step and /home/ada", "/home/ada"), "~/parts/a.step and ~");
+    assert_eq!(replace_home("/HOME/ADA/a.step", "/home/ada"), "/HOME/ADA/a.step");
+    assert_eq!(replace_home("/Users/ada/a.step", "/Users/ada/"), "~/a.step");
+    // Windows: plain, JSON-escaped (command parameters), forward slashes and any case.
+    let home = r"C:\Users\User";
+    assert_eq!(replace_home(r"C:\Users\User\secret\plate.step", home), r"~\secret\plate.step");
+    assert_eq!(replace_home(r#"{"path":"C:\\Users\\User/secret/plate.step"}"#, home), r#"{"path":"~/secret/plate.step"}"#);
+    assert_eq!(replace_home("C:/Users/User/secret/plate.step", home), "~/secret/plate.step");
+    assert_eq!(replace_home(r"c:\users\USER\a.step", home), r"~\a.step");
+    assert_eq!(replace_home(r"at C:\Users\Jörg\a.rs, c:\USERS\jörg\b.rs", r"C:\Users\Jörg\"), r"at ~\a.rs, ~\b.rs");
+    // Non-ASCII names in any case (Unicode lowercasing, not just ASCII).
+    assert_eq!(replace_home(r"C:\USERS\JÖRG\a.rs", r"C:\Users\Jörg"), r"~\a.rs");
+    // Only at a path boundary: a separator, the end, or a character no file name holds.
+    let al = r"C:\Users\Al";
+    assert_eq!(replace_home(r"C:\Users\Alice\x and C:\Users\Al Smith\y", al), r"C:\Users\Alice\x and C:\Users\Al Smith\y");
+    assert_eq!(replace_home(r#"C:\Users\Al\x, "C:\Users\Al", C:\Users\Al"#, al), r#"~\x, "~", ~"#);
+    assert_eq!(replace_home(r#"{"p":"C:\\Users\\Alice\\x","q":"C:\\Users\\Al\\y"}"#, al), r#"{"p":"C:\\Users\\Alice\\x","q":"~\\y"}"#);
+    assert_eq!(replace_home("/home/al/x /home/alice/y /home/al", "/home/al"), "~/x /home/alice/y ~");
+    // Unix: whatever cannot continue a user name ends it, punctuation and a final `.` too.
+    let ada = "/home/ada";
+    assert_eq!(replace_home("cannot write '/home/ada'", ada), "cannot write '~'");
+    assert_eq!(replace_home("cwd is /home/ada, aborting", ada), "cwd is ~, aborting");
+    assert_eq!(replace_home("in /home/ada; (/home/ada) [/home/ada] {/home/ada} at /home/ada.", ada), "in ~; (~) [~] {~} at ~.");
+    assert_eq!(replace_home(r"/home/ada /home/ada\tmp", ada), r"~ ~\tmp");
+    assert_eq!(replace_home("/home/ada.old /home/ada_2 /home/ada-x /home/ada./x", ada), "/home/ada.old /home/ada_2 /home/ada-x /home/ada./x");
+    // Nothing else is touched: other folders, a bare drive or root, an empty home.
+    assert_eq!(replace_home(r"D:\Users\User\a.step", home), r"D:\Users\User\a.step");
+    assert_eq!(replace_home(r"C:\data\a.step", r"C:\"), r"C:\data\a.step");
+    assert_eq!(replace_home("/data/a.step", "/"), "/data/a.step");
+    assert_eq!(replace_home("/data/a.step", ""), "/data/a.step");
+}
+
+#[test]
+fn both_homes_and_the_short_profile_name_are_hidden() {
+    // Git Bash or Cygwin: `HOME` is a Unix-style path, `USERPROFILE` the Windows one.
+    let homes = ["/c/Users/ada".to_string(), r"C:\Users\ada".to_string()];
+    let s = r"/c/Users/ada/a.step C:\Users\ada\b.step c:/users/ADA/c.step";
+    assert_eq!(replace_homes(s, &homes), r"~/a.step ~\b.step ~/c.step");
+    // A home inside another one: the longer goes first.
+    let homes = ["/home/ada".to_string(), "/home/ada/win".to_string()];
+    assert_eq!(replace_homes("/home/ada/win/x /home/ada/y", &homes), "~/x ~/y");
+    // The 8.3 short name, read from the temporary folder.
+    let profile = r"C:\Users\Adam Smith";
+    let short = short_home(profile, r"C:\Users\ADAMSM~1\AppData\Local\Temp");
+    assert_eq!(short.as_deref(), Some(r"C:\Users\ADAMSM~1"));
+    let homes = [profile.to_string(), short.unwrap_or_default()];
+    assert_eq!(replace_homes(r"C:\Users\ADAMSM~1\AppData\Local\Temp\x.step", &homes), r"~\AppData\Local\Temp\x.step");
+    assert_eq!(replace_homes(r#"["C:\\Users\\Adam Smith\\a","c:\\users\\adamsm~1\\b"]"#, &homes), r#"["~\\a","~\\b"]"#);
+    // No short name: the temporary folder holds the long name, lies elsewhere or is unset.
+    assert_eq!(short_home(profile, r"C:\Users\Adam Smith\AppData\Local\Temp"), None);
+    assert_eq!(short_home(profile, r"D:\Temp"), None);
+    assert_eq!(short_home(profile, ""), None);
+    assert_eq!(short_home("", r"C:\Users\ADAMSM~1\Temp"), None);
+    assert_eq!(short_home(r"C:\", r"C:\PROGRA~1\Temp"), None);
+}
