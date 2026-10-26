@@ -285,7 +285,7 @@ pub fn rows<'m>(model: &'m Model, resolved: &Resolved, mesh: &Mesh, warnings: &m
         xyz: &mesh.xyz,
         labels: &mesh.labels,
         faces: |owner: &str, set: &str| -> Result<Vec<TieFace>> {
-            Ok(faces(model, resolved, mesh, owner, set)?.into_iter().map(|f| TieFace { nodes: f.nodes, thickness: f.thickness }).collect())
+            Ok(faces(model, resolved, mesh, owner, set, false)?.into_iter().map(|f| TieFace { nodes: f.nodes, thickness: f.thickness }).collect())
         },
     };
     let translations = [DofKind::Ux, DofKind::Uy, DofKind::Uz];

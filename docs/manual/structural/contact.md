@@ -182,6 +182,20 @@ a generic scalar: `f64` for values, forward-mode `Dual` for gradients and `Hyper
 packed Hessian in the 24 corner coordinates) for the consistent tangent, the exact linearisation
 of the segmentation, normal and projection (`fieldcraft_fem::dual`).
 
+**Quadratic faces** (tri6, quad8: tet10, hex20; Puso, Laursen & Solberg 2008). Each face is
+segmented as four flat facets through its nodes (a tri6's four sub-triangles, a quad8's four
+quadrilaterals round its centre), each facet pair projected, clipped and integrated as linear
+faces are, with the quadratic shape functions at the facets' points and the points interpolated
+quadratically from the nodes. On the secondary side the multiplier basis is transformed,
+Φ_c = N_c + α (N_m + N_m') at a corner and Φ_m = (1 − 2α) N_m at a mid-side node: the standard
+functions integrate to 0 at a tri6's corners and to −A/12 at a quad8's, which leaves those nodes
+no area. α is the smallest that makes Φ non-negative over the face, 1/4 on a tri6 (Φ_c = L_c²) and
+3/8 on a quad8, so every node's weighted gap is a positive average of the gap; Φ remains a
+partition of unity spanning the same space, and the patch test holds. The automatic
+differentiation runs per facet pair over the facets' 24 vertex coordinates and is chained to the
+nodes exactly. A node's reported pressure is its nodal force in the transformed basis over its
+area.
+
 **2D models** (plane strain, plane stress, axisymmetric). Each edge is oriented with its normal
 (t_y, −t_x) out of its element; the main edge is projected along the secondary edge's normal onto
 its line, which maps main points to the secondary parameter linearly, so the overlap is an interval
@@ -428,8 +442,13 @@ Nonlinear static, oracle cases:
 
 Tests in `crates/solver/tests/contact.rs`: the contact patch test on non-matching hex8, tet4 and
 (plane strain, axisymmetric) quad4 meshes, to 10⁻⁹ with small sliding and 10⁻⁴ with finite sliding,
-where the gaps the augmentation leaves enter through their geometric terms; Hertz's line contact
-(the half-width bracketed);
+where the gaps the augmentation leaves enter through their geometric terms, and on hex20 and tet10
+meshes against each other and against hex8 and tet4 ones (10⁻⁹ with small sliding, 2 × 10⁻⁴ with
+finite sliding, heavy); the chain rule of the quadratic pairs' gradient and Hessian against central
+differences on curved faces; Hertz's line contact
+(the half-width bracketed), and on hex20 and tet10 with their mid-side nodes on the circle (curved
+faces: peak pressure within 0.9 % and 4.2 %, the nodal pressures inside 0.6 b within 15 % of the
+ellipse as corners and mid-side nodes alternate, the half-width bracketed; heavy);
 Hertz's sphere on a flat, a quarter model (peak pressure within 4 %, contact radius bracketed;
 heavy); Newton's quadratic rate near the solution with finite sliding; Coulomb friction between
 pressed blocks (stick below the cone with the forces of glued blocks; slip carrying μ N to 0.1 %
@@ -443,8 +462,13 @@ folds onto itself (heavy suite).
 
 ## Limitations
 
-- Nonlinear static contact takes linear faces only (tri3, quad4: tet4, wedge6, hex8) and in 2D the
-  linear edges of tri3 and quad4; quadratic faces and edges are refused by name.
+- Nonlinear static contact takes linear and quadratic faces (tri3, quad4, tri6, quad8: tet4, tet10,
+  wedge6, hex8, hex20) and in 2D the linear edges of tri3 and quad4; quadratic edges are refused
+  by name, as is a mid-side node shared by a tri6 and a quad8 face of a secondary surface (their
+  multiplier bases differ there).
+- On quadratic faces the reported nodal pressures alternate between corners and mid-side nodes
+  where the pressure varies (by about a tenth in the Hertz test on hex20 and tet10); the forces
+  are consistent, a node's pressure is its force over its area in the transformed basis.
 - Arc-length steps refuse contact. The linear implicit analyses (static, frequency, buckling,
   heat) refuse contact by name.
 - The static friction tangent is symmetrised: convergence slows while nodes slip. A static step
@@ -473,6 +497,7 @@ folds onto itself (heavy suite).
 ## References
 
 - M. A. Puso, T. A. Laursen. *A mortar segment-to-segment contact method for large deformation solid mechanics.* CMAME 193:601–629, 2004.
+- M. A. Puso, T. A. Laursen, J. Solberg. *A segment-to-segment mortar contact method for quadratic elements and large deformations.* CMAME 197:555–566, 2008.
 - K. A. Fischer, P. Wriggers. *Frictionless 2D contact formulations for finite deformations based on the mortar method.* Comput. Mech. 36:226–244, 2005.
 - T. W. McDevitt, T. A. Laursen. *A mortar-finite element formulation for frictional contact problems.* IJNME 48:1525–1547, 2000.
 - J. C. Simo, T. A. Laursen. *An augmented Lagrangian treatment of contact problems involving friction.* Comput. Struct. 42(1):97–116, 1992.

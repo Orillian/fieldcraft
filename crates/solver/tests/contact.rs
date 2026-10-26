@@ -7,28 +7,82 @@ use std::collections::BTreeMap;
 
 use fieldcraft_model::*;
 use fieldcraft_solver::contact::Status;
-use fieldcraft_solver::{Limits, StaticResult, solve_nonlinear};
+use fieldcraft_solver::{Error, Limits, StaticResult, solve_nonlinear};
 
 /// A model built block by block.
 #[derive(Default)]
 struct Blocks {
     model: Model,
     xyz: BTreeMap<u32, [f64; 3]>,
+    /// Each corner node's point in its block's unit cube.
+    params: BTreeMap<u32, [f64; 3]>,
     next_node: u32,
     next_element: u32,
 }
 
 impl Blocks {
     /// A structured block of `n` cells over the unit cube mapped by `map`, hex8 or tet4 (six
-    /// Kuhn tetrahedra per cell); its elements' labels.
+    /// Kuhn tetrahedra per cell), or hex20 or tet10 with straight edges (mid-side nodes at the
+    /// middles of the mapped corners); its elements' labels.
     fn block(&mut self, kind: ElementKind, n: [usize; 3], map: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<u32> {
+        self.quadratic_block(kind, n, false, map)
+    }
+
+    /// As [`Blocks::block`], with `curved` the mid-side nodes of hex20 and tet10 at the image of
+    /// their edges' middles in the unit cube, so the faces follow `map` (a mapped circle stays
+    /// on the circle at every node).
+    fn quadratic_block(&mut self, kind: ElementKind, n: [usize; 3], curved: bool, map: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<u32> {
+        let linear = match kind {
+            ElementKind::Hex20 => ElementKind::Hex8,
+            ElementKind::Tet10 => ElementKind::Tet4,
+            k => k,
+        };
+        let out = self.linear_block(linear, n, &map);
+        if linear != kind {
+            let mut mids: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+            for l in &out {
+                let mut nodes = self.model.element(*l).unwrap().nodes.clone();
+                for e in kind.edges() {
+                    let (a, b) = (nodes[e[0]], nodes[e[1]]);
+                    let m = *mids.entry((a.min(b), a.max(b))).or_insert_with(|| {
+                        let x = if curved {
+                            map([0, 1, 2].map(|k| 0.5 * (self.params[&a][k] + self.params[&b][k])))
+                        } else {
+                            [0, 1, 2].map(|k| 0.5 * (self.xyz[&a][k] + self.xyz[&b][k]))
+                        };
+                        self.add_node(x)
+                    });
+                    nodes.push(m);
+                }
+                self.model.set_element(*l, kind, nodes).unwrap();
+            }
+        }
+        out
+    }
+
+    /// A new node at `x`; its label.
+    fn add_node(&mut self, x: [f64; 3]) -> u32 {
+        self.next_node += 1;
+        self.model.set_node(self.next_node, x).unwrap();
+        self.xyz.insert(self.next_node, x);
+        self.next_node
+    }
+
+    /// The first node (lowest label) at `x`.
+    fn node_at(&self, x: [f64; 3]) -> Option<u32> {
+        self.nodes(|y| (0..3).all(|k| near(x[k], y[k]))).first().copied()
+    }
+
+    fn linear_block(&mut self, kind: ElementKind, n: [usize; 3], map: impl Fn([f64; 3]) -> [f64; 3]) -> Vec<u32> {
         let first = self.next_node + 1;
         let label = |i: [usize; 3]| first + (i[0] + (n[0] + 1) * (i[1] + (n[1] + 1) * i[2])) as u32;
         for k in 0..=n[2] {
             for j in 0..=n[1] {
                 for i in 0..=n[0] {
-                    let x = map([i as f64 / n[0] as f64, j as f64 / n[1] as f64, k as f64 / n[2] as f64]);
+                    let p = [i as f64 / n[0] as f64, j as f64 / n[1] as f64, k as f64 / n[2] as f64];
+                    let x = map(p);
                     let l = label([i, j, k]);
+                    self.params.insert(l, p);
                     self.model.set_node(l, x).unwrap();
                     self.xyz.insert(l, x);
                     self.next_node = self.next_node.max(l);
@@ -217,15 +271,126 @@ fn the_mortar_interface_passes_the_contact_patch_test() {
     }
 }
 
+/// The contact patch test with quadratic faces: hex20 and tet10 blocks pressed together, against
+/// each other and against linear ones, the upper block secondary, with small (`finite`: finite)
+/// sliding. The transformed multiplier basis of the quadratic secondary faces carries the
+/// uniform pressure at corners and mid-side nodes alike, and the facets of the segmentation are
+/// the faces exactly (straight edges).
+fn quadratic_patch(finite: bool) {
+    // Small sliding is linear and exact; finite sliding is exact up to the gaps the augmentation
+    // leaves and the convergence, as with linear faces.
+    let tol = if finite { 2e-4 } else { 1e-9 };
+    for (lower, upper, name) in [
+        (ElementKind::Hex20, ElementKind::Hex20, "hex20 on hex20"),
+        (ElementKind::Tet10, ElementKind::Tet10, "tet10 on tet10"),
+        (ElementKind::Tet10, ElementKind::Hex20, "hex20 on tet10"),
+        (ElementKind::Hex8, ElementKind::Hex20, "hex20 on hex8"),
+        (ElementKind::Hex20, ElementKind::Tet4, "tet4 on hex20"),
+    ] {
+        let (b, r) = patch(lower, upper, finite, false);
+        let szz: Vec<f64> = r.elements.iter().flat_map(|e| e.nodal.iter().map(|s| s[2])).collect();
+        let mean = szz.iter().sum::<f64>() / szz.len() as f64;
+        assert!(mean < 0.0, "{name}: {mean}");
+        // σzz uniform and σxx, σyy zero in every element, over |σzz|.
+        let spread =
+            r.elements.iter().flat_map(|e| &e.nodal).map(|s| (s[2] - mean).abs().max(s[0].abs()).max(s[1].abs())).fold(0.0, f64::max) / mean.abs();
+        let c = &r.contacts[0];
+        // The pressure equal to the stress at every secondary node.
+        let pressure = c.pressure.iter().map(|p| (p + mean).abs()).fold(0.0, f64::max) / mean.abs();
+        let top: f64 = b.nodes(|x| near(x[2], 2.0)).iter().map(|l| r.reaction[r.nodes.binary_search(l).unwrap()][2]).sum();
+        let force = (c.force[2] + top).abs().max((c.normal_force + top).abs()) / top.abs();
+        eprintln!(
+            "{name} (finite {finite}): σzz {mean:.6}, spread {spread:.1e}, pressure {pressure:.1e}, force {force:.1e}, penetration {:.1e}",
+            c.penetration
+        );
+        assert!(spread < tol && pressure < tol && force < tol, "{name} (finite {finite}): {spread:e} {pressure:e} {force:e}");
+        assert!(c.force[0].abs() < tol * top.abs() && c.force[1].abs() < tol * top.abs(), "{name}: {:?}", c.force);
+        assert!(c.penetration < 1e-5, "{name}: {}", c.penetration);
+    }
+}
+
+#[test]
+fn quadratic_faces_pass_the_contact_patch_test() {
+    quadratic_patch(false);
+}
+
+#[test]
+#[ignore = "heavy: cargo xtask test --heavy (CI heavy job)"]
+fn quadratic_faces_pass_the_contact_patch_test_with_finite_sliding() {
+    quadratic_patch(true);
+}
+
+/// What quadratic contact refuses by name: ties of quadratic faces (dual mortar takes linear
+/// faces), and a secondary face collapsed by a mid-side node moved onto its corner.
+#[test]
+fn what_quadratic_contact_refuses() {
+    let mut q = Blocks::default();
+    let low = q.block(ElementKind::Hex20, [1, 1, 1], |p| p);
+    let up = q.block(ElementKind::Hex20, [1, 1, 1], |p| [p[0], p[1], 1.0 + p[2]]);
+    q.define(1000.0, 0.3, NonlinearStatic::default());
+    q.face_set("lower_top", &low, |x| near(x[2], 1.0));
+    q.face_set("upper_bottom", &up, |x| near(x[2], 1.0));
+    q.bc("z0", [Some(0.0), Some(0.0), Some(0.0)], |x| near(x[2], 0.0));
+    q.bc("push", [Some(0.0), Some(0.0), Some(-0.01)], |x| near(x[2], 2.0));
+    let mut tied = q.model.clone();
+    tied.add_tie("glue", Tie::new("lower_top", "upper_bottom")).unwrap();
+    let e = solve_nonlinear(&tied, Some("Step"), &Limits::default()).unwrap_err().to_string();
+    assert!(e.contains("hex20") && e.contains("linear faces"), "{e}");
+    // A mid-side node of the secondary face moved onto a corner.
+    q.pair("interface", "lower_top", "upper_bottom");
+    let face = q.faces(&up, |x| near(x[2], 1.0))[0];
+    let nodes = q.model.face_nodes(face).unwrap();
+    let corner = q.xyz[&nodes[0]];
+    q.model.set_node(nodes[4], corner).unwrap();
+    // (The element under it is refused first, by name.)
+    let e = solve_nonlinear(&q.model, Some("Step"), &Limits::default()).unwrap_err().to_string();
+    assert!(e.contains("hex20") && e.contains("degenerate"), "{e}");
+}
+
+/// A secondary surface whose tri6 and quad8 faces share a mid-side node is refused naming the
+/// node: the two faces transform the multiplier basis by different α there.
+#[test]
+fn a_mid_side_node_of_a_tri6_and_a_quad8_face_is_refused() {
+    let mut q = Blocks::default();
+    // The upper block first: its nodes are the first found at the interface.
+    let up = q.block(ElementKind::Hex20, [1, 1, 1], |p| [p[0], p[1], 1.0 + p[2]]);
+    let low = q.block(ElementKind::Hex8, [2, 1, 1], |p| [2.0 * p[0], p[1], p[2]]);
+    // A tet10 beside the hex20, sharing its edge x = 1, z = 1 (corners and mid-side node).
+    // Positive volume: (1, 0, 1), (2, 0, 1), (1, 1, 1), (1.5, 0, 2).
+    let corners = [[1.0, 0.0, 1.0], [2.0, 0.0, 1.0], [1.0, 1.0, 1.0], [1.5, 0.0, 2.0]].map(|x| q.node_at(x).unwrap_or_else(|| q.add_node(x)));
+    let mut nodes = corners.to_vec();
+    for e in ElementKind::Tet10.edges() {
+        let mid = [0, 1, 2].map(|k| 0.5 * (q.xyz[&corners[e[0]]][k] + q.xyz[&corners[e[1]]][k]));
+        nodes.push(q.node_at(mid).unwrap_or_else(|| q.add_node(mid)));
+    }
+    let shared = q.node_at([1.0, 0.5, 1.0]).unwrap();
+    assert!(nodes.contains(&shared));
+    q.next_element += 1;
+    let tet = q.next_element;
+    q.model.set_element(tet, ElementKind::Tet10, nodes).unwrap();
+    q.define(1000.0, 0.3, NonlinearStatic::default());
+    q.face_set("lower_top", &low, |x| near(x[2], 1.0));
+    let secondary: Vec<u32> = up.iter().copied().chain([tet]).collect();
+    q.face_set("upper_bottom", &secondary, |x| near(x[2], 1.0));
+    q.pair("interface", "lower_top", "upper_bottom");
+    q.bc("z0", [Some(0.0), Some(0.0), Some(0.0)], |x| near(x[2], 0.0));
+    q.bc("push", [Some(0.0), Some(0.0), Some(-0.01)], |x| near(x[2], 2.0));
+    let e = solve_nonlinear(&q.model, Some("Step"), &Limits::default()).unwrap_err();
+    let named = |m: &str| m.contains(&format!("mid-side node {shared} ")) && m.contains("tri6") && m.contains("quad8");
+    assert!(matches!(&e, Error::NotSupported(m) if named(m)), "{e}");
+}
+
 /// Hertz contact of a cylinder on a flat (plane strain): a quarter model of an indenter whose
 /// bottom is a circle of radius `r` on a block, symmetric about x = 0, one element thick in z
-/// with z held (plane strain). Returns the model and the result.
-fn hertz_cylinder(finite: bool, push: f64) -> (Blocks, StaticResult) {
+/// with z held (plane strain), of `kind` elements with `1 / coarsen` the cells of the hex8 model
+/// in x and y; hex20 and tet10 have their mid-side nodes on the circle (curved faces). Returns the
+/// model and the result.
+fn hertz_cylinder(kind: ElementKind, coarsen: usize, finite: bool, push: f64) -> (Blocks, StaticResult) {
     let r = 10.0;
     let mut b = Blocks::default();
     let grade = |s: f64| s.powf(1.6);
-    let foundation = b.block(ElementKind::Hex8, [24, 14, 1], |p| [5.0 * grade(p[0]), -5.0 * grade(1.0 - p[1]), 0.2 * p[2]]);
-    let indenter = b.block(ElementKind::Hex8, [20, 10, 1], |p| {
+    let foundation = b.quadratic_block(kind, [24 / coarsen, 14 / coarsen, 1], true, |p| [5.0 * grade(p[0]), -5.0 * grade(1.0 - p[1]), 0.2 * p[2]]);
+    let indenter = b.quadratic_block(kind, [20 / coarsen, 10 / coarsen, 1], true, |p| {
         let x = 2.5 * grade(p[0]);
         [x, r - (r * r - x * x).sqrt() + 2.5 * grade(p[1]), 0.2 * p[2]]
     });
@@ -246,6 +411,19 @@ fn hertz_cylinder(finite: bool, push: f64) -> (Blocks, StaticResult) {
     (b, r)
 }
 
+/// Hertz's closed form for the model of [`hertz_cylinder`]: the load per length P (the reaction
+/// at the base over the slab's thickness, both halves), the half-width b and the peak pressure
+/// p₀, with the largest nodal pressure found.
+fn hertz_line(b: &Blocks, r: &StaticResult) -> (f64, f64, f64, f64) {
+    let base: f64 = b.nodes(|x| near(x[1], -5.0)).iter().map(|l| r.reaction[r.nodes.binary_search(l).unwrap()][1]).sum();
+    let p = 2.0 * base / 0.2;
+    let e_star = 1000.0 / (2.0 * (1.0 - 0.09));
+    let half_width = (4.0 * p * 10.0 / (std::f64::consts::PI * e_star)).sqrt();
+    let peak = 2.0 * p / (std::f64::consts::PI * half_width);
+    let found = r.contacts[0].pressure.iter().fold(0.0f64, |m, v| m.max(*v));
+    (p, half_width, peak, found)
+}
+
 /// Hertz's line contact (H. Hertz, *Über die Berührung fester elastischer Körper*, J. reine
 /// angew. Math. 92:156–171, 1882; K. L. Johnson, *Contact Mechanics*, Cambridge 1985, §4.3):
 /// for a load P per length, b = √(4 P R / (π E*)) and p₀ = 2 P / (π b), E* = E / (2 (1 − ν²))
@@ -253,17 +431,9 @@ fn hertz_cylinder(finite: bool, push: f64) -> (Blocks, StaticResult) {
 #[test]
 fn hertz_cylinder_on_a_flat() {
     for finite in [false, true] {
-        let (b, r) = hertz_cylinder(finite, 0.03);
-        let c = &r.contacts[0];
-        let thickness = 0.2;
-        // The load per length: the reaction at the base over the slab's thickness, both halves.
-        let base: f64 = b.nodes(|x| near(x[1], -5.0)).iter().map(|l| r.reaction[r.nodes.binary_search(l).unwrap()][1]).sum();
-        let p = 2.0 * base / thickness;
-        let e_star = 1000.0 / (2.0 * (1.0 - 0.09));
-        let half_width = (4.0 * p * 10.0 / (std::f64::consts::PI * e_star)).sqrt();
-        let peak = 2.0 * p / (std::f64::consts::PI * half_width);
-        let found = c.pressure.iter().fold(0.0f64, |m, v| m.max(*v));
-        let (before, next) = edge(&b, c, 2);
+        let (b, r) = hertz_cylinder(ElementKind::Hex8, 1, finite, 0.03);
+        let (p, half_width, peak, found) = hertz_line(&b, &r);
+        let (before, next) = edge(&b, &r.contacts[0], 2);
         eprintln!("finite {finite}: P {p:.4} b {half_width:.4} ({before:.4}..{next:.4}) p0 {peak:.4} found {found:.4}");
         assert!((found - peak).abs() < 0.03 * peak, "p0 {found} vs {peak}");
         assert!(before <= half_width && half_width <= next, "b {half_width} not in ({before}, {next})");
@@ -271,6 +441,44 @@ fn hertz_cylinder_on_a_flat() {
             quadratic(&r);
         }
     }
+}
+
+/// Hertz's line contact on quadratic faces (the closed form of [`hertz_cylinder_on_a_flat`]):
+/// `kind` (hex20 or tet10) with half the cells in x and y (the hex8 model's nodes), their mid-side
+/// nodes on the circle, so the secondary faces are curved and the facets of the segmentation are
+/// not the faces. The nodal pressures alternate between corners and mid-side nodes by up to about
+/// a tenth around the ellipse (the transformed basis spreads each node's force over its own
+/// area), so the peak is the largest nodal value and the profile is checked within 15 % inside.
+fn hertz_on_quadratic_faces(kind: ElementKind, peak_tol: f64) {
+    let (b, r) = hertz_cylinder(kind, 2, false, 0.03);
+    let c = &r.contacts[0];
+    let (p, half_width, peak, found) = hertz_line(&b, &r);
+    let (before, next) = edge(&b, c, 2);
+    eprintln!("{kind:?}: P {p:.4} b {half_width:.4} ({before:.4}..{next:.4}) p0 {peak:.4} found {found:.4}");
+    assert!((found - peak).abs() < peak_tol * peak, "{kind:?}: p0 {found} vs {peak}");
+    assert!(before <= half_width && half_width <= next, "{kind:?}: b {half_width} not in ({before}, {next})");
+    // The contact carries the whole load (P is per length of both halves).
+    let base = p * 0.2 / 2.0;
+    assert!((c.normal_force.abs() - base.abs()).abs() < 1e-3 * base.abs(), "{kind:?}: {} vs {base}", c.normal_force);
+    for (l, v) in c.nodes.iter().zip(&c.pressure) {
+        let x = b.xyz[l][0];
+        if near(b.xyz[l][2], 0.0) && x < 0.6 * half_width {
+            let hertz = peak * (1.0 - (x / half_width).powi(2)).sqrt();
+            assert!((v - hertz).abs() < 0.15 * peak, "{kind:?}: p({x}) {v} vs {hertz}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "heavy: cargo xtask test --heavy (CI heavy job)"]
+fn hertz_cylinder_on_hex20_faces() {
+    hertz_on_quadratic_faces(ElementKind::Hex20, 0.02);
+}
+
+#[test]
+#[ignore = "heavy: cargo xtask test --heavy (CI heavy job)"]
+fn hertz_cylinder_on_tet10_faces() {
+    hertz_on_quadratic_faces(ElementKind::Tet10, 0.05);
 }
 
 /// The contact's edge along the x axis (the nodes on the plane where coordinate `across` is 0):
@@ -405,9 +613,14 @@ fn hertz_sphere_on_a_flat() {
 /// (both in proportion over the step), with Coulomb friction `friction`; the reactions at the
 /// top (normal, tangential) and the result.
 fn sheared(down: f64, side: f64, friction: Friction, finite: bool) -> (f64, f64, StaticResult) {
+    sheared_blocks(ElementKind::Hex8, down, side, friction, finite)
+}
+
+/// [`sheared`] with blocks of `kind`.
+fn sheared_blocks(kind: ElementKind, down: f64, side: f64, friction: Friction, finite: bool) -> (f64, f64, StaticResult) {
     let mut b = Blocks::default();
-    let low = b.block(ElementKind::Hex8, [3, 3, 1], |p| p);
-    let up = b.block(ElementKind::Hex8, [2, 2, 1], |p| [p[0], p[1], 1.0 + p[2]]);
+    let low = b.block(kind, [3, 3, 1], |p| p);
+    let up = b.block(kind, [2, 2, 1], |p| [p[0], p[1], 1.0 + p[2]]);
     b.define(1000.0, 0.3, NonlinearStatic { nonlinear_geometry: finite, initial_increment: 0.25, ..NonlinearStatic::default() });
     b.face_set("lower_top", &low, |x| near(x[2], 1.0));
     b.face_set("upper_bottom", &up, |x| near(x[2], 1.0));
@@ -459,6 +672,17 @@ fn coulomb_friction_sticks_below_the_cone_and_slips_on_it() {
         let (n3, t3, _) = sheared(0.01, 0.001 * 2.0 * mu / ratio, decaying, finite);
         assert!((t3 - 0.2 * n3).abs() < tol * 0.2 * n3, "finite {finite}: T {t3} vs μk N {}", 0.2 * n3);
     }
+}
+
+/// Coulomb friction on quadratic faces: hex20 blocks slipping carry μ N, every secondary node
+/// (corners and mid-side nodes) slipping.
+#[test]
+fn quadratic_faces_slip_carrying_mu_n() {
+    let mu = 0.3;
+    let (n, t, r) = sheared_blocks(ElementKind::Hex20, 0.01, 0.03, Friction::coulomb(mu), false);
+    eprintln!("hex20: N {n:.4} T {t:.4}");
+    assert!((t - mu * n).abs() < 1e-3 * mu * n, "T {t} vs μN {}", mu * n);
+    assert!(r.contacts[0].status.iter().all(|s| *s == Status::Slip), "{:?}", r.contacts[0].status);
 }
 
 /// Two blocks of non-matching meshes tied at z = 1 (`lower_kind` 3 × 3 × 2, graded or distorted,

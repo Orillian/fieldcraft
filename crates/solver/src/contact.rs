@@ -89,16 +89,38 @@
 //! thickness under it is its area over the edge's length. Points keep z = 0 and the 2D nodes have
 //! no Z translation, so the tangent blocks keep their in-plane rows.
 //!
-//! **Scope.** Linear solid faces (tri3 and quad4 faces: tet4, wedge6 and hex8 elements) in 3D
-//! models and linear edges (tri3 and quad4 elements) in 2D ones, with Coulomb friction
-//! ([`Interface::friction`]). Quadratic faces and edges and arc-length steps are refused by name.
+//! **Quadratic faces** (tri6 and quad8: tet10 and hex20 elements), on either side and against
+//! linear ones (M. A. Puso, T. A. Laursen, J. Solberg, *A segment-to-segment mortar contact
+//! method for quadratic elements and large deformations*, CMAME 197:555–566, 2008). Each face is
+//! segmented as four flat facets through its nodes ([`fieldcraft_fem::mortar::integrate_faces`]),
+//! with the quadratic shape functions evaluated at the facets' points, so a pair of faces is
+//! integrated facet pair by facet pair as linear faces are; the points' positions are the
+//! quadratic interpolation of the nodes. The secondary side's multiplier basis Φ is the
+//! transformed one of [`fieldcraft_fem::mortar::multiplier`]: the standard quadratic functions
+//! integrate to nothing at a tri6's corners and to a negative area at a quad8's, which would
+//! leave those nodes no area to carry a pressure; Φ spans the same space, is a partition of
+//! unity (so the patch test holds) and is non-negative, so every node has a positive area A_A and
+//! its weighted gap is a positive average of the gap over its faces. The linearisation is still
+//! exact: the automatic differentiation runs per facet pair over the facets' 24 vertex
+//! coordinates, chained to the nodes ([`quadratic_terms`]). The reported pressure of a node of a
+//! quadratic face is its nodal force in the multiplier basis over its area
+//! ([`Interface::in_multiplier_basis`]).
+//!
+//! **Scope.** Solid faces (tri3, quad4, tri6 and quad8 faces: tet4, tet10, wedge6, hex8 and hex20
+//! elements) in 3D models and linear edges (tri3 and quad4 elements) in 2D ones, with Coulomb
+//! friction ([`Interface::friction`]). Quadratic edges and arc-length steps are refused by name,
+//! as are quadratic faces in ties ([`crate::tie`]) and a mid-side node shared by a tri6 and a
+//! quad8 face of a secondary surface (the two transform the basis differently there).
 
 use std::collections::BTreeMap;
 
 use fieldcraft_fem::contact::{Aabb, Grid, bounds};
-use fieldcraft_fem::dual::{Dual, Hyper, Real, VARS};
+use fieldcraft_fem::dual::{Dual, Hyper, PACKED, Real, VARS, packed};
 use fieldcraft_fem::frame::{Vec3, dot, norm, unit};
-use fieldcraft_fem::mortar::{Sample, area_vector, edge_area_vector, integrate, integrate_edges};
+use fieldcraft_fem::mortar::{
+    FACE_NODES, FaceSample, Sample, alpha, dot as dot_t, edge_area_vector, face_area_vector, facet_points, facet_vertices, facets, integrate,
+    integrate_edges, integrate_faces, integrate_facet, interpolate_fixed, reversed, sub, vertex_weights,
+};
 use fieldcraft_model::{Contact, ContactSurfaces, ElementEdge, ElementFace, ElementKind, Extent, Friction, InitialPenetration, Model, Resolved};
 use fieldcraft_parallel as parallel;
 use serde::Serialize;
@@ -181,6 +203,9 @@ pub struct Interface {
     friction: Option<Friction>,
     /// A 2D model's out-of-plane measure (its surfaces are edges); `None`: solid faces.
     extent: Option<Extent>,
+    /// The mid-side nodes of the quadratic secondary faces, the corners at their ends (indices in
+    /// [`Interface::nodes`]) and their faces' α, for the nodal forces in the multiplier basis.
+    mid_sides: Vec<((usize, usize, usize), f64)>,
 }
 
 /// A contact's state carried from one converged increment to the next: per secondary node the
@@ -295,10 +320,22 @@ struct PairTerms {
     dofs: Vec<[Option<usize>; 3]>,
     /// Secondary node indices (in [`Interface::nodes`]) of the secondary corners.
     corners: Vec<usize>,
-    /// ∂g̃_a/∂x per secondary corner (24 variables; corner c of the pair at 3c, main corners from 12).
-    gradient: Vec<[f64; VARS]>,
-    /// Σ_a p_a ∂²g̃_a, packed (tangent evaluations only).
+    /// ∂g̃_a/∂x per secondary node a over the pair's nodes (3 per node, secondary nodes first).
+    gradient: Vec<Vec<f64>>,
+    /// −Σ_a p_a ∂²g̃_a over the pair's nodes, dense (tangent evaluations only).
     hessian: Option<Vec<f64>>,
+}
+
+/// The variable of a linear pair's AD ([`variables`]) for coordinate `k` of its node `c` (`s`
+/// secondary corners, then the main ones).
+fn var(s: usize, c: usize, k: usize) -> usize {
+    if c < s { 3 * c + k } else { 12 + 3 * (c - s) + k }
+}
+
+/// A linear pair's gradient over its AD variables, over its nodes instead (`s` secondary
+/// corners, `count` nodes).
+fn by_node(g: &[f64; VARS], s: usize, count: usize) -> Vec<f64> {
+    (0..3 * count).map(|i| g.get(var(s, i / 3, i % 3)).copied().unwrap_or(0.0)).collect()
 }
 
 /// The tangent blocks of a contact: per block its mesh slots and the dense matrix over their
@@ -310,12 +347,15 @@ fn position(mesh: &Mesh, u: &[f64], node: usize, dofs: &[Option<usize>; 3]) -> V
     [0, 1, 2].map(|k| x[k] + dofs[k].and_then(|d| u.get(d)).copied().unwrap_or(0.0))
 }
 
-/// The element's volume (hex8, tet4), or a 2D element's area (tri3, quad4), for the thickness
+/// The element's volume (hex8, tet4, and hex20, tet10 by their corners), or a 2D element's area (tri3, quad4), for the thickness
 /// under a face or edge.
 fn volume(kind: ElementKind, x: &[Vec3]) -> Option<f64> {
     match kind {
         ElementKind::Hex8 => <[Vec3; 8]>::try_from(x).ok().and_then(|a| fieldcraft_fem::uniform::Hex8::hex8(&a).ok()).map(|k| k.volume),
         ElementKind::Tet4 => <[Vec3; 4]>::try_from(x).ok().and_then(|a| fieldcraft_fem::uniform::Tet4::tet4(&a).ok()).map(|k| k.volume),
+        // Quadratic elements: their corners' (straight-sided) volume.
+        ElementKind::Hex20 => x.get(..8).and_then(|c| volume(ElementKind::Hex8, c)),
+        ElementKind::Tet10 => x.get(..4).and_then(|c| volume(ElementKind::Tet4, c)),
         ElementKind::Tri3 | ElementKind::Quad4 => {
             // The shoelace formula over the corners in the XY plane.
             let doubled: f64 = x.iter().zip(x.iter().cycle().skip(1)).map(|(a, b)| a[0] * b[1] - a[1] * b[0]).sum();
@@ -331,7 +371,7 @@ pub(crate) fn thickness(kind: ElementKind, element: &[Vec3], x: &[Vec3], area: f
     volume(kind, element).filter(|v| *v > 0.0 && area > 0.0).map_or(size(x), |v| v / area)
 }
 
-/// The overlap integration of a face pair (`extent`: `None`) or an edge pair of a 2D model.
+/// The overlap integration of a linear face pair (`extent`: `None`) or an edge pair of a 2D model.
 fn overlap<T: Real>(extent: Option<Extent>, xs: &[[T; 3]], xm: &[[T; 3]], f: impl FnMut(&Sample<T>)) -> Option<()> {
     match extent {
         None => integrate(xs, xm, f),
@@ -339,10 +379,20 @@ fn overlap<T: Real>(extent: Option<Extent>, xs: &[[T; 3]], xm: &[[T; 3]], f: imp
     }
 }
 
-/// A face's area vector, or an edge's ([`edge_area_vector`]) in a 2D model.
+/// The overlap integration of a face pair of any order ([`integrate_faces`]: a linear pair's
+/// points are [`overlap`]'s) or of an edge pair of a 2D model.
+fn integrate_pair<T: Real>(extent: Option<Extent>, xs: &[[T; 3]], xm: &[[T; 3]], mut f: impl FnMut(&FaceSample<T>)) -> Option<()> {
+    match extent {
+        None => integrate_faces(xs, xm, f),
+        Some(e) => integrate_edges(xs, xm, e, |p| f(&FaceSample::linear(p))),
+    }
+}
+
+/// A face's area vector (a quadratic face's facets' sum), or an edge's ([`edge_area_vector`]) in
+/// a 2D model.
 fn area_of(extent: Option<Extent>, x: &[Vec3]) -> Option<Vec3> {
     match extent {
-        None => area_vector(x),
+        None => face_area_vector(x),
         Some(e) => edge_area_vector(x, e),
     }
 }
@@ -353,9 +403,9 @@ fn size(x: &[Vec3]) -> f64 {
 }
 
 /// The faces of set `set` for definition `owner` (``contact `name` ``, ``tie `name` ``), refused
-/// unless they are linear faces of analysed solid elements.
-pub(crate) fn faces(model: &Model, resolved: &Resolved, mesh: &Mesh, owner: &str, set: &str) -> Result<Vec<Face>> {
-    face_list(model, mesh, owner, resolved.sets.get(set).map(|s| s.faces.as_slice()).unwrap_or_default())
+/// unless they are faces of analysed solid elements, linear unless `quadratic`.
+pub(crate) fn faces(model: &Model, resolved: &Resolved, mesh: &Mesh, owner: &str, set: &str, quadratic: bool) -> Result<Vec<Face>> {
+    face_list(model, mesh, owner, resolved.sets.get(set).map(|s| s.faces.as_slice()).unwrap_or_default(), quadratic)
 }
 
 /// The edges of set `set` of a 2D model for definition `owner`, refused unless they are linear
@@ -365,12 +415,12 @@ fn edges(model: &Model, resolved: &Resolved, mesh: &Mesh, owner: &str, set: &str
 }
 
 /// The faces `list` for definition `owner`, as [`faces`].
-fn face_list(model: &Model, mesh: &Mesh, owner: &str, list: &[ElementFace]) -> Result<Vec<Face>> {
+fn face_list(model: &Model, mesh: &Mesh, owner: &str, list: &[ElementFace], quadratic: bool) -> Result<Vec<Face>> {
     list.iter()
         .map(|f| {
             let at = |what: String| Error::Invalid(format!("{owner}: element {} face {}: {what}", f.element, f.face));
             let labels = model.face_nodes(*f).ok_or_else(|| at("no such face".into()))?;
-            surface_face(mesh, owner, f.element, labels, false, at)
+            surface_face(mesh, owner, f.element, labels, Surface::Faces { quadratic }, at)
         })
         .collect()
 }
@@ -381,20 +431,33 @@ fn edge_list(model: &Model, mesh: &Mesh, owner: &str, list: &[ElementEdge]) -> R
         .map(|e| {
             let at = |what: String| Error::Invalid(format!("{owner}: element {} edge {}: {what}", e.element, e.edge));
             let labels = model.edge_nodes(*e).ok_or_else(|| at("no such edge".into()))?;
-            surface_face(mesh, owner, e.element, labels, true, at)
+            surface_face(mesh, owner, e.element, labels, Surface::Edges, at)
         })
         .collect()
 }
 
-/// One face (or, `edge`, one edge of a 2D element) of element `element` with nodes `labels`.
-fn surface_face(mesh: &Mesh, owner: &str, element: u32, labels: Vec<u32>, edge: bool, at: impl Fn(String) -> Error) -> Result<Face> {
+/// What a surface is made of: faces of solid elements (quadratic ones too, or only linear
+/// ones), or linear edges of 2D elements.
+#[derive(Debug, Clone, Copy)]
+enum Surface {
+    Faces { quadratic: bool },
+    Edges,
+}
+
+/// One face (or one edge of a 2D element) of element `element` with nodes `labels`.
+fn surface_face(mesh: &Mesh, owner: &str, element: u32, labels: Vec<u32>, surface: Surface, at: impl Fn(String) -> Error) -> Result<Face> {
     let el = mesh.element(element).ok_or_else(|| at("the element is not a solid or 2D element of the analysis".into()))?;
-    let (linear, takes) = if edge {
-        (labels.len() == 2 && el.kind.dimension() == 2, "the linear edges of tri3 and quad4 elements")
-    } else {
-        (matches!(labels.len(), 3 | 4) && el.kind.dimension() == 3, "the linear faces of tet4, wedge6 and hex8 elements")
+    let edge = matches!(surface, Surface::Edges);
+    let (taken, takes) = match surface {
+        Surface::Edges => (labels.len() == 2 && el.kind.dimension() == 2, "the linear edges of tri3 and quad4 elements"),
+        Surface::Faces { quadratic: false } => {
+            (matches!(labels.len(), 3 | 4) && el.kind.dimension() == 3, "the linear faces of tet4, wedge6 and hex8 elements")
+        }
+        Surface::Faces { quadratic: true } => {
+            (matches!(labels.len(), 3 | 4 | 6 | 8) && el.kind.dimension() == 3, "the faces of tet4, tet10, wedge6, hex8 and hex20 elements")
+        }
     };
-    if !linear {
+    if !taken {
         let what = if edge { "edges" } else { "faces" };
         return Err(Error::NotSupported(format!(
             "{owner} on the {what} of {} elements (element {element}) in implicit analyses; it takes {takes}",
@@ -428,7 +491,7 @@ fn surface_face(mesh: &Mesh, owner: &str, element: u32, labels: Vec<u32>, edge: 
     // The face's area, or the edge's length.
     let area = match x.as_slice() {
         [a, b] if edge => norm([b[0] - a[0], b[1] - a[1], 0.0]),
-        _ => area_vector(&x).map_or(0.0, norm),
+        _ => face_area_vector(&x).map_or(0.0, norm),
     };
     let thickness = thickness(el.kind, &el.xyz, &x, area);
     if !(thickness > 0.0 && thickness.is_finite()) {
@@ -441,43 +504,48 @@ fn surface_face(mesh: &Mesh, owner: &str, element: u32, labels: Vec<u32>, edge: 
 }
 
 /// A face pair of small-sliding contact: its mortar integrals in the reference configuration,
-/// D_ai = ∫ Φ_a N_i (secondary corners i) and M_aj = ∫ Φ_a N_j (main corners j), and the
+/// D_ai = ∫ Φ_a N_i (secondary nodes i) and M_aj = ∫ Φ_a N_j (main nodes j), and the
 /// secondary face's normal there, so that g̃_a = n · (Σ_j M_aj x_j − Σ_i D_ai x_i).
 #[derive(Debug, Clone)]
 struct Fixed {
     main: usize,
-    d: [[f64; 4]; 4],
-    m: [[f64; 4]; 4],
+    d: [[f64; FACE_NODES]; FACE_NODES],
+    m: [[f64; FACE_NODES]; FACE_NODES],
     normal: Vec3,
-    support: [f64; 4],
+    support: [f64; FACE_NODES],
 }
 
 impl Fixed {
-    /// B_a, the slip operator ([`slip_operator`]) of the reference configuration.
-    fn slip_jacobian(&self, a: usize) -> [[f64; VARS]; 3] {
-        let mut j = [[0.0; VARS]; 3];
+    /// B_a, the slip operator ([`slip_operator`]) of the reference configuration, for a pair of
+    /// `s` secondary and `t` main nodes.
+    fn slip_jacobian(&self, a: usize, s: usize, t: usize) -> [Vec<f64>; 3] {
+        let mut j = [0, 1, 2].map(|_| vec![0.0; 3 * (s + t)]);
         let (Some(d), Some(m)) = (self.d.get(a), self.m.get(a)) else { return j };
         let n = self.normal;
-        for k in 0..3 {
+        for (k, row) in j.iter_mut().enumerate() {
             for l in 0..3 {
                 let proj = if k == l { 1.0 } else { 0.0 } - n[k] * n[l];
-                for i in 0..4 {
-                    j[k][3 * i + l] = d[i] * proj;
-                    j[k][12 + 3 * i + l] = -m[i] * proj;
+                for (i, d) in d.iter().take(s).enumerate() {
+                    row[3 * i + l] = d * proj;
+                }
+                for (i, m) in m.iter().take(t).enumerate() {
+                    row[3 * (s + i) + l] = -m * proj;
                 }
             }
         }
         j
     }
 
-    /// ∂g̃_a/∂x over the pair's variables (secondary corners from 0, main corners from 12).
-    fn gradient(&self, a: usize) -> [f64; VARS] {
-        let mut g = [0.0; VARS];
+    /// ∂g̃_a/∂x over the pair's nodes (`s` secondary, then `t` main).
+    fn gradient(&self, a: usize, s: usize, t: usize) -> Vec<f64> {
+        let mut g = vec![0.0; 3 * (s + t)];
         let (Some(d), Some(m)) = (self.d.get(a), self.m.get(a)) else { return g };
         for k in 0..3 {
-            for i in 0..4 {
-                g[3 * i + k] = -d[i] * self.normal[k];
-                g[12 + 3 * i + k] = m[i] * self.normal[k];
+            for (i, d) in d.iter().take(s).enumerate() {
+                g[3 * i + k] = -d * self.normal[k];
+            }
+            for (i, m) in m.iter().take(t).enumerate() {
+                g[3 * (s + i) + k] = m * self.normal[k];
             }
         }
         g
@@ -485,14 +553,15 @@ impl Fixed {
 }
 
 /// What a secondary face finds against the main surface: per main face, ∫ Φ_a g and ∫ Φ_a for
-/// each corner a.
+/// each node a.
 struct Found {
     main: usize,
-    gap: [f64; 4],
-    support: [f64; 4],
+    gap: [f64; FACE_NODES],
+    support: [f64; FACE_NODES],
 }
 
-/// The weighted gaps g̃_a of one face pair (corners `xs`, `xm`) over any scalar.
+/// The weighted gaps g̃_a of one linear face pair (corners `xs`, `xm`) over any scalar (quadratic
+/// pairs: [`quadratic_terms`]).
 fn weighted_gaps<T: Real>(extent: Option<Extent>, xs: &[[T; 3]], xm: &[[T; 3]]) -> Option<[T; 4]> {
     let mut g = [T::cst(0.0); 4];
     overlap(extent, xs, xm, |p| {
@@ -504,33 +573,207 @@ fn weighted_gaps<T: Real>(extent: Option<Extent>, xs: &[[T; 3]], xm: &[[T; 3]]) 
     Some(g)
 }
 
-/// The slip operator of one face pair (corners `xs`, `xm`): per secondary corner a the matrix
+/// The slip operator of one face pair (nodes `xs`, `xm`): per secondary node a the matrix
 /// B_a with w_a = B_a Δx, the weighted tangential slip ∫ Φ_a (I − n n)(Δx_s − Δx_m) dA of the
-/// pair's corners' motions Δx (rows: its components; columns: the pair's variables, secondary
-/// corners from 0, main corners from 12), with the integrals on the current configuration: the
-/// rate form of the mortar slip, B_a = [∫ Φ_a N_i P, −∫ Φ_a N_j P] (McDevitt & Laursen 2000; Puso &
-/// Laursen 2004), P = I − n n.
-fn slip_operator(extent: Option<Extent>, xs: &[Vec3], xm: &[Vec3]) -> Option<[[[f64; VARS]; 3]; 4]> {
-    let mut b = [[[0.0; VARS]; 3]; 4];
-    overlap(extent, xs, xm, |p| {
+/// pair's nodes' motions Δx (rows: its components; columns: the pair's nodes' translations,
+/// secondary nodes first), with the integrals on the current configuration: the rate form of
+/// the mortar slip, B_a = [∫ Φ_a N_i P, −∫ Φ_a N_j P] (McDevitt & Laursen 2000; Puso & Laursen
+/// 2004), P = I − n n.
+fn slip_operator(extent: Option<Extent>, xs: &[Vec3], xm: &[Vec3]) -> Option<Vec<[Vec<f64>; 3]>> {
+    let (s, t) = (xs.len(), xm.len());
+    let mut b: Vec<[Vec<f64>; 3]> = (0..s).map(|_| [0, 1, 2].map(|_| vec![0.0; 3 * (s + t)])).collect();
+    integrate_pair(extent, xs, xm, |p| {
         let n = p.normal;
-        for a in 0..4 {
-            let wa = p.weight * p.secondary[a];
+        for (ba, phi) in b.iter_mut().zip(p.multiplier) {
+            let wa = p.weight * phi;
             if wa == 0.0 {
                 continue;
             }
-            for k in 0..3 {
+            for (k, row) in ba.iter_mut().enumerate() {
                 for l in 0..3 {
                     let proj = wa * (if k == l { 1.0 } else { 0.0 } - n[k] * n[l]);
-                    for c in 0..4 {
-                        b[a][k][3 * c + l] += proj * p.secondary[c];
-                        b[a][k][12 + 3 * c + l] -= proj * p.main[c];
+                    for (c, nc) in p.secondary.iter().take(s).enumerate() {
+                        row[3 * c + l] += proj * nc;
+                    }
+                    for (c, nc) in p.main.iter().take(t).enumerate() {
+                        row[3 * (s + c) + l] -= proj * nc;
                     }
                 }
             }
         }
     })?;
     Some(b)
+}
+
+/// What one facet pair's pass computes ([`facet_terms`]).
+#[derive(Clone, Copy)]
+enum Pass<'a> {
+    /// The weighted gaps and their direct derivatives.
+    Gaps,
+    /// Those, and T for the nodes' pressures.
+    GapsAndT(&'a [f64]),
+    /// Ψ for the nodes' pressures.
+    Psi(&'a [f64]),
+}
+
+/// One facet pair's integrals over any scalar, with the pair's nodes `xs`, `xm` held as constants
+/// (the facets' vertices, in `vs`, `vm`, are the variables): per secondary node a the weighted gap
+/// G_a = ∫ Φ_a (x_m − x_s) · n with x = Σ N_i x_i, and the direct derivatives of the G_a with
+/// respect to the nodes, ∂G_a/∂x_i = ∓∫ Φ_a N_i n (values, nodes `xs` then `xm`); with the
+/// pressures p, T_i = Σ_a p_a ∂G_a/∂x_i, or Ψ = Σ_a p_a G_a alone ([`Pass`]). `any`: whether the
+/// facets overlap.
+struct FacetTerms<T> {
+    gaps: [T; FACE_NODES],
+    direct: Vec<Vec<f64>>,
+    psi: T,
+    t: Vec<T>,
+    any: bool,
+}
+
+fn facet_terms<T: Real>(
+    (ns, fs, xs, vs): (usize, usize, &[Vec3], &[[T; 3]]),
+    (nm, fm, xm, vm): (usize, usize, &[Vec3], &[[T; 3]]),
+    pass: Pass,
+) -> Option<FacetTerms<T>> {
+    let zero = T::cst(0.0);
+    let width = 3 * (ns + nm);
+    let (rows, t) = match pass {
+        Pass::Gaps => (ns, 0),
+        Pass::GapsAndT(_) => (ns, width),
+        Pass::Psi(_) => (0, 0),
+    };
+    let mut out = FacetTerms { gaps: [zero; FACE_NODES], direct: vec![vec![0.0; width]; rows], psi: zero, t: vec![zero; t], any: false };
+    integrate_facet((ns, fs), vs, (nm, fm), vm, |p| {
+        out.any = true;
+        let gap = dot_t(sub(interpolate_fixed(xm, &p.main), interpolate_fixed(xs, &p.secondary)), p.normal);
+        // ∓N_i per node, secondary then main.
+        let shapes = || p.secondary.iter().take(ns).map(|n| -*n).chain(p.main.iter().take(nm).copied());
+        let pressure_weight = |pressure: &[f64]| p.weight * p.multiplier.iter().zip(pressure).fold(zero, |s, (m, pa)| s + *m * *pa);
+        match pass {
+            Pass::Psi(pressure) => out.psi = out.psi + pressure_weight(pressure) * gap,
+            Pass::Gaps | Pass::GapsAndT(_) => {
+                for ((g, direct), phi) in out.gaps.iter_mut().zip(out.direct.iter_mut()).zip(p.multiplier) {
+                    let wa = p.weight * phi;
+                    *g = *g + wa * gap;
+                    for (c, n) in shapes().enumerate() {
+                        let v = wa.val() * n.val();
+                        for k in 0..3 {
+                            if let Some(d) = direct.get_mut(3 * c + k) {
+                                *d += v * p.normal[k].val();
+                            }
+                        }
+                    }
+                }
+                if let Pass::GapsAndT(pressure) = pass {
+                    let wp = pressure_weight(pressure);
+                    for (c, n) in shapes().enumerate() {
+                        let wn = wp * n;
+                        for k in 0..3 {
+                            if let Some(t) = out.t.get_mut(3 * c + k) {
+                                *t = *t + wn * p.normal[k];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })?;
+    Some(out)
+}
+
+/// ∂g̃_a/∂x per secondary node a over the pair's nodes (3 per node, secondary first) and, with the
+/// nodes' `pressure`, the block −Σ_a p_a ∂²g̃_a, of a pair with a quadratic face (nodes `xs`,
+/// `xm`). Per facet pair the automatic differentiation runs over the facets' vertices V (24
+/// variables, as a linear pair's corners), which are fixed combinations V = W x of the nodes
+/// ([`vertex_weights`]), with the nodes x in the quadratic interpolation of the points held
+/// apart: g̃_a = G_a(V(x), x), linear in its second argument, so that
+///
+///   ∂g̃_a/∂x = ∂G_a/∂x + Wᵀ ∂G_a/∂V,
+///   ∂²Ψ/∂x² = Wᵀ Ψ_VV W + Wᵀ ∂T/∂V + (∂T/∂V)ᵀ W   (Ψ = Σ_a p_a g̃_a, T = ∂Ψ/∂x at fixed V),
+///
+/// exact, at a few times a linear pair's cost per facet pair.
+#[allow(clippy::type_complexity)]
+fn quadratic_terms(xs: &[Vec3], xm: &[Vec3], pressure: Option<&[f64]>) -> Option<(Vec<Vec<f64>>, Option<Vec<f64>>)> {
+    let (ns, nm) = (xs.len(), xm.len());
+    let width = 3 * (ns + nm);
+    let (ps, pm) = (facet_points(xs)?, facet_points(xm)?);
+    let mains: Vec<(&[usize], Vec<Vec3>)> = facets(nm)?.iter().map(|m| (*m, facet_vertices(&pm, m))).collect();
+    let mut gradient = vec![vec![0.0; width]; ns];
+    let mut hessian = pressure.map(|_| vec![0.0; width * width]);
+    // No pressure, no second derivatives.
+    let pressed = pressure.filter(|p| p.iter().any(|v| *v != 0.0));
+    let mut row = vec![0.0; width];
+    for (i, fs) in facets(ns)?.iter().enumerate() {
+        let vs = facet_vertices(&ps, fs);
+        for (j, (fm, vm)) in mains.iter().enumerate() {
+            // Per facet vertex: its first variable and the pair's nodes it combines.
+            let slots: Vec<(usize, &[(usize, f64)], usize)> = fs
+                .iter()
+                .enumerate()
+                .map(|(k, v)| (3 * k, vertex_weights(ns, *v), 0))
+                .chain(fm.iter().enumerate().map(|(k, v)| (12 + 3 * k, vertex_weights(nm, *v), ns)))
+                .collect();
+            // Wᵀ applied to a gradient over the facets' variables, added to `out` (over the nodes).
+            let chain = |out: &mut [f64], g: &[f64; VARS], scale: f64| {
+                for &(first, weights, offset) in &slots {
+                    for &(node, w) in weights {
+                        for k in 0..3 {
+                            if let (Some(o), Some(v)) = (out.get_mut(3 * (offset + node) + k), g.get(first + k)) {
+                                *o += scale * w * v;
+                            }
+                        }
+                    }
+                }
+            };
+            let (a, b) = variables(&vs, vm, Dual::var);
+            let pass = pressed.map_or(Pass::Gaps, Pass::GapsAndT);
+            let terms = facet_terms((ns, i, xs, &a), (nm, j, xm, &b), pass)?;
+            if !terms.any {
+                continue;
+            }
+            for ((out, g), direct) in gradient.iter_mut().zip(&terms.gaps).zip(&terms.direct) {
+                out.iter_mut().zip(direct).for_each(|(o, d)| *o += d);
+                chain(out, &g.g, 1.0);
+            }
+            let (Some(h), Some(p)) = (hessian.as_mut(), pressed) else { continue };
+            // −Wᵀ ∂T/∂V and its transpose.
+            for (r, t) in terms.t.iter().enumerate() {
+                row.fill(0.0);
+                chain(&mut row, &t.g, -1.0);
+                for (c, v) in row.iter().enumerate().filter(|(_, v)| **v != 0.0) {
+                    if let Some(x) = h.get_mut(r * width + c) {
+                        *x += v;
+                    }
+                    if let Some(x) = h.get_mut(c * width + r) {
+                        *x += v;
+                    }
+                }
+            }
+            // −Wᵀ Ψ_VV W.
+            let (a, b) = variables(&vs, vm, Hyper::var);
+            let psi = facet_terms((ns, i, xs, &a), (nm, j, xm, &b), Pass::Psi(p))?.psi;
+            for &(f1, w1, o1) in &slots {
+                for &(f2, w2, o2) in &slots {
+                    for k1 in 0..3 {
+                        for k2 in 0..3 {
+                            let v = psi.h.get(packed(f1 + k1, f2 + k2)).copied().unwrap_or(0.0);
+                            if v == 0.0 {
+                                continue;
+                            }
+                            for &(n1, a1) in w1 {
+                                for &(n2, a2) in w2 {
+                                    if let Some(x) = h.get_mut((3 * (o1 + n1) + k1) * width + 3 * (o2 + n2) + k2) {
+                                        *x -= a1 * a2 * v;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some((gradient, hessian))
 }
 
 /// The variables of a face pair: secondary corners at 0, main corners from 12.
@@ -565,9 +808,9 @@ impl Interface {
         let extent = mesh.theory.map(|t| t.extent());
         // A set's faces or (2D) edges, or every exterior one of the model.
         let surface = |set: Option<&String>| match (set, extent) {
-            (Some(s), None) => faces(model, resolved, mesh, &owner, s),
+            (Some(s), None) => faces(model, resolved, mesh, &owner, s, true),
             (Some(s), Some(_)) => edges(model, resolved, mesh, &owner, s),
-            (None, None) => face_list(model, mesh, &owner, &model.exterior_faces()),
+            (None, None) => face_list(model, mesh, &owner, &model.exterior_faces(), true),
             (None, Some(_)) => edge_list(model, mesh, &owner, &model.exterior_edges()),
         };
         let (secondary, main) = match &contact.surfaces {
@@ -586,11 +829,10 @@ impl Interface {
         for f in &secondary {
             let x: Vec<Vec3> = f.nodes.iter().map(|n| mesh.xyz.get(*n).copied().unwrap_or_default()).collect();
             // ∫ Φ_a over the face itself (the face against its own mirror image).
-            let mirror: Vec<Vec3> = x.iter().rev().copied().collect();
-            let mut own = [0.0; 4];
-            overlap(extent, &x, &mirror, |p| {
-                for a in 0..4 {
-                    own[a] += p.weight * p.secondary[a];
+            let mut own = [0.0; FACE_NODES];
+            integrate_pair(extent, &x, &reversed(&x), |p| {
+                for (o, phi) in own.iter_mut().zip(p.multiplier) {
+                    *o += p.weight * phi;
                 }
             });
             for (n, share) in f.nodes.iter().zip(own) {
@@ -607,11 +849,31 @@ impl Interface {
                 }
             }
         }
+        let label_of = |i: usize| nodes.get(i).and_then(|n| mesh.labels.get(*n)).copied().unwrap_or(0);
         if let Some(i) = area.iter().position(|a| !(*a > 0.0 && a.is_finite())) {
-            let label = nodes.get(i).and_then(|n| mesh.labels.get(*n)).copied().unwrap_or(0);
-            return Err(Error::Invalid(format!("contact `{name}`: the secondary faces at node {label} have no area")));
+            return Err(Error::Invalid(format!("contact `{name}`: the secondary faces at node {} have no area", label_of(i))));
         }
         let offset = vec![0.0; nodes.len()];
+        // Each mid-side node with the node count of the faces it is on.
+        let mut mid_sides: BTreeMap<(usize, usize, usize), usize> = BTreeMap::new();
+        for f in secondary.iter().filter(|f| f.nodes.len() > 4) {
+            let index = |k: usize| f.nodes.get(k).and_then(|n| nodes.binary_search(n).ok());
+            let c = f.nodes.len() / 2;
+            for k in 0..c {
+                // Each edge once: two faces see it in opposite directions.
+                if let (Some(m), Some(a), Some(b)) = (index(c + k), index(k), index((k + 1) % c)) {
+                    let count = *mid_sides.entry((m, a.min(b), a.max(b))).or_insert(f.nodes.len());
+                    // A tri6 and a quad8 transform the basis by different α at the node: no
+                    // single basis holds there, so its pressure would be wrong.
+                    if count != f.nodes.len() {
+                        return Err(Error::NotSupported(format!(
+                            "contact `{name}`: mid-side node {} is shared by a tri6 face and a quad8 face of the secondary surface (their multiplier bases differ there); mesh that surface with one kind of quadratic face, or make the other surface secondary",
+                            label_of(m)
+                        )));
+                    }
+                }
+            }
+        }
         Ok(Interface {
             name: name.to_string(),
             secondary,
@@ -624,6 +886,7 @@ impl Interface {
             fixed: None,
             friction: (!contact.friction.is_frictionless()).then_some(contact.friction),
             extent,
+            mid_sides: mid_sides.into_iter().map(|(edge, count)| (edge, alpha(count))).collect(),
         })
     }
 
@@ -705,16 +968,22 @@ impl Interface {
                 .into_iter()
                 .filter_map(|f| {
                     let xm = xm.get(f.main)?;
-                    let (mut d, mut m, mut normal) = ([[0.0; 4]; 4], [[0.0; 4]; 4], [0.0; 3]);
-                    overlap(self.extent, xs, xm, |p| {
+                    let (mut d, mut m, mut normal) = ([[0.0; FACE_NODES]; FACE_NODES], [[0.0; FACE_NODES]; FACE_NODES], [0.0; 3]);
+                    let mut mean = [0.0; 3];
+                    integrate_pair(self.extent, xs, xm, |p| {
                         normal = p.normal;
-                        for a in 0..4 {
-                            for i in 0..4 {
-                                d[a][i] += p.weight * p.secondary[a] * p.secondary[i];
-                                m[a][i] += p.weight * p.secondary[a] * p.main[i];
+                        (0..3).for_each(|k| mean[k] += p.weight * p.normal[k]);
+                        for a in 0..FACE_NODES {
+                            for i in 0..FACE_NODES {
+                                d[a][i] += p.weight * p.multiplier[a] * p.secondary[i];
+                                m[a][i] += p.weight * p.multiplier[a] * p.main[i];
                             }
                         }
                     })?;
+                    // A quadratic pair's facets may face apart (a curved face): their mean normal.
+                    if xs.len() > 4 || xm.len() > 4 {
+                        normal = unit(mean).unwrap_or(normal);
+                    }
                     Some(Fixed { main: f.main, d, m, normal, support: f.support })
                 })
                 .collect()
@@ -745,14 +1014,14 @@ impl Interface {
                 if dot(ns, *nm) >= -FACING * norm(ns) * norm(*nm) {
                     continue;
                 }
-                let (mut gap, mut support, mut deepest, mut any) = ([0.0; 4], [0.0; 4], f64::INFINITY, false);
-                overlap(self.extent, &xs, xm, |p| {
+                let (mut gap, mut support, mut deepest, mut any) = ([0.0; FACE_NODES], [0.0; FACE_NODES], f64::INFINITY, false);
+                integrate_pair(self.extent, &xs, xm, |p| {
                     any = true;
                     let g = p.gap();
                     deepest = deepest.min(g);
-                    for a in 0..4 {
-                        gap[a] += p.weight * g * p.secondary[a];
-                        support[a] += p.weight * p.secondary[a];
+                    for a in 0..FACE_NODES {
+                        gap[a] += p.weight * g * p.multiplier[a];
+                        support[a] += p.weight * p.multiplier[a];
                     }
                 });
                 if any && deepest >= -m.depth && gap.iter().chain(&support).all(|v| v.is_finite()) {
@@ -878,21 +1147,40 @@ impl Interface {
             let (xs, xm) = (Interface::corners(mesh, u, f), Interface::corners(mesh, u, m));
             let pressure: Vec<f64> = corners.iter().map(|i| state.pressure.get(*i).copied().unwrap_or(0.0)).collect();
             let fixed = self.fixed.as_ref().and_then(|f| f.get(s)).and_then(|l| l.get(k));
+            let (ns, count) = (corners.len(), xs.len() + xm.len());
             let (gradient, hessian) = if let Some(fixed) = fixed {
                 // Small sliding: linear in the positions.
-                ((0..corners.len()).map(|a| fixed.gradient(a)).collect(), None)
+                ((0..ns).map(|a| fixed.gradient(a, ns, xm.len())).collect(), None)
+            } else if xs.len() > 4 || xm.len() > 4 {
+                let Some(terms) = quadratic_terms(&xs, &xm, tangent.then_some(pressure.as_slice())) else { return Ok(None) };
+                terms
             } else if tangent {
                 let (vs, vm) = variables(&xs, &xm, Hyper::var);
                 let Some(g) = weighted_gaps(self.extent, &vs, &vm) else { return Ok(None) };
-                let mut h = vec![0.0; fieldcraft_fem::dual::PACKED];
+                let mut h = vec![0.0; PACKED];
                 for (ga, p) in g.iter().zip(&pressure) {
                     h.iter_mut().zip(&ga.h).for_each(|(x, y)| *x += p * y);
                 }
-                (g.iter().take(corners.len()).map(|ga| ga.g).collect::<Vec<_>>(), Some(h))
+                // −Σ_a p_a ∂²g̃_a over the pair's nodes.
+                let width = 3 * count;
+                let mut data = vec![0.0; width * width];
+                for ci in 0..count {
+                    for ki in 0..3 {
+                        for cj in 0..count {
+                            for kj in 0..3 {
+                                let at = packed(var(ns, ci, ki), var(ns, cj, kj));
+                                if let Some(x) = data.get_mut((3 * ci + ki) * width + 3 * cj + kj) {
+                                    *x = -h.get(at).copied().unwrap_or(0.0);
+                                }
+                            }
+                        }
+                    }
+                }
+                (g.iter().take(ns).map(|ga| by_node(&ga.g, ns, count)).collect::<Vec<_>>(), Some(data))
             } else {
                 let (vs, vm) = variables(&xs, &xm, Dual::var);
                 let Some(g) = weighted_gaps(self.extent, &vs, &vm) else { return Ok(None) };
-                (g.iter().take(corners.len()).map(|ga| ga.g).collect(), None)
+                (g.iter().take(ns).map(|ga| by_node(&ga.g, ns, count)).collect(), None)
             };
             let nodes = f.nodes.iter().chain(&m.nodes).copied().collect();
             let dofs = f.dofs.iter().chain(&m.dofs).copied().collect();
@@ -906,8 +1194,7 @@ impl Interface {
                 let p = state.pressure.get(*i).copied().unwrap_or(0.0);
                 let Some(g) = t.gradient.get(a) else { continue };
                 for (c, (node, dofs)) in t.nodes.iter().zip(&t.dofs).enumerate() {
-                    let var = if c < t.corners.len() { 3 * c } else { 12 + 3 * (c - t.corners.len()) };
-                    let gv = [0, 1, 2].map(|k| g.get(var + k).copied().unwrap_or(0.0));
+                    let gv = [0, 1, 2].map(|k| g.get(3 * c + k).copied().unwrap_or(0.0));
                     let own = t.corners.get(c).and_then(|j| state.nodal_force.get_mut(*j));
                     let mut on = [0.0; 3];
                     for k in 0..3 {
@@ -928,26 +1215,8 @@ impl Interface {
                     }
                 }
             }
-            if let Some(h) = &t.hessian {
-                // −Σ_a p_a ∂²g̃_a over the pair's nodes.
-                let count = t.nodes.len();
-                let s = t.corners.len();
-                let var = |c: usize, k: usize| if c < s { 3 * c + k } else { 12 + 3 * (c - s) + k };
-                let width = 3 * count;
-                let mut data = vec![0.0; width * width];
-                for ci in 0..count {
-                    for ki in 0..3 {
-                        for cj in 0..count {
-                            for kj in 0..3 {
-                                let at = fieldcraft_fem::dual::packed(var(ci, ki), var(cj, kj));
-                                if let Some(x) = data.get_mut((3 * ci + ki) * width + 3 * cj + kj) {
-                                    *x = -h.get(at).copied().unwrap_or(0.0);
-                                }
-                            }
-                        }
-                    }
-                }
-                blocks.push((t.nodes.clone(), data));
+            if let Some(data) = t.hessian {
+                blocks.push((t.nodes, data));
             }
         }
         // (ε_A / A_A) ∂g̃_A ⊗ ∂g̃_A per closed node.
@@ -1012,25 +1281,18 @@ impl Interface {
             let m = self.main.get(pairs.get(s)?.get(k)?.main)?;
             let (xs, xm) = (Interface::corners(mesh, u, f), Interface::corners(mesh, u, m));
             let (rs, rm) = (Interface::corners(mesh, reference, f), Interface::corners(mesh, reference, m));
-            let operator: Vec<[[f64; VARS]; 3]> = match self.fixed.as_ref().and_then(|f| f.get(s)).and_then(|l| l.get(k)) {
-                Some(fixed) => (0..corners.len()).map(|a| fixed.slip_jacobian(a)).collect(),
+            let operator: Vec<[Vec<f64>; 3]> = match self.fixed.as_ref().and_then(|f| f.get(s)).and_then(|l| l.get(k)) {
+                Some(fixed) => (0..corners.len()).map(|a| fixed.slip_jacobian(a, xs.len(), xm.len())).collect(),
                 None => slip_operator(self.extent, &xs, &xm)?.into_iter().take(corners.len()).collect(),
             };
-            let mut delta = [0.0; VARS];
-            for (i, (x, r)) in xs.iter().zip(&rs).enumerate() {
-                (0..3).for_each(|c| delta[3 * i + c] = x[c] - r[c]);
-            }
-            for (j, (x, r)) in xm.iter().zip(&rm).enumerate() {
-                (0..3).for_each(|c| delta[12 + 3 * j + c] = x[c] - r[c]);
-            }
-            let slips: Vec<(Vec3, [[f64; VARS]; 3])> =
-                operator.into_iter().map(|b| (b.map(|row| row.iter().zip(&delta).map(|(x, y)| x * y).sum()), b)).collect();
+            let delta: Vec<f64> = xs.iter().zip(&rs).chain(xm.iter().zip(&rm)).flat_map(|(x, r)| [0, 1, 2].map(|c| x[c] - r[c])).collect();
+            let slips: Vec<(Vec3, [Vec<f64>; 3])> =
+                operator.into_iter().map(|b| ([0, 1, 2].map(|k| b[k].iter().zip(&delta).map(|(x, y)| x * y).sum()), b)).collect();
             let nodes: Vec<usize> = f.nodes.iter().chain(&m.nodes).copied().collect();
             let dofs: Vec<[Option<usize>; 3]> = f.dofs.iter().chain(&m.dofs).copied().collect();
             Some((nodes, dofs, corners.clone(), slips))
         });
         let terms: Vec<_> = terms.into_iter().flatten().collect();
-        let var = |count: usize, c: usize, l: usize| if c < count { 3 * c + l } else { 12 + 3 * (c - count) + l };
         // Node sums: the slip, and with the tangent J_A over the nodes the node reaches.
         let mut total = vec![[0.0; 3]; n];
         let mut jacobians: BTreeMap<usize, BTreeMap<usize, [[f64; 3]; 3]>> = BTreeMap::new();
@@ -1043,7 +1305,7 @@ impl Interface {
                         let block = jacobians.entry(*i).or_default().entry(*node).or_insert([[0.0; 3]; 3]);
                         for k in 0..3 {
                             for l in 0..3 {
-                                block[k][l] += jac[k].get(var(corners.len(), c, l)).copied().unwrap_or(0.0);
+                                block[k][l] += jac[k].get(3 * c + l).copied().unwrap_or(0.0);
                             }
                         }
                     }
@@ -1092,7 +1354,7 @@ impl Interface {
                     continue;
                 }
                 for (c, d) in dofs.iter().enumerate() {
-                    let on: Vec3 = std::array::from_fn(|l| (0..3).map(|k| t[k] * jac[k].get(var(corners.len(), c, l)).copied().unwrap_or(0.0)).sum());
+                    let on: Vec3 = std::array::from_fn(|l| (0..3).map(|k| t[k] * jac[k].get(3 * c + l).copied().unwrap_or(0.0)).sum());
                     for l in 0..3 {
                         if let Some(x) = d[l].and_then(|d| internal.get_mut(d)) {
                             *x -= on[l];
@@ -1149,12 +1411,12 @@ impl Interface {
         let penetration = state.gap.iter().zip(&status).filter(|(_, s)| s.is_closed()).filter_map(|(g, _)| *g).fold(0.0f64, |m, g| m.max(-g));
         // The force on the secondary nodes pushes them back along −n; its tangential part is the
         // friction's.
-        let normal: Vec<f64> = state.nodal_force.iter().zip(&state.normal).map(|(f, n)| -dot(*f, *n)).collect();
+        let nodal = self.in_multiplier_basis(&state.nodal_force);
+        let normal: Vec<f64> = nodal.iter().zip(&state.normal).map(|(f, n)| -dot(*f, *n)).collect();
         let per_area = |v: f64, a: f64| if a > 0.0 { v / a } else { 0.0 };
         let pressure = normal.iter().zip(&state.support).map(|(f, a)| per_area(*f, *a)).collect();
         let shear = if self.friction.is_some() {
-            state
-                .nodal_force
+            nodal
                 .iter()
                 .zip(&state.normal)
                 .zip(&state.support)
@@ -1183,6 +1445,27 @@ impl Interface {
         }
     }
 
+    /// Nodal forces `forces` of the secondary nodes in the multiplier basis: F̃ = T F for Φ = T N
+    /// ([`fieldcraft_fem::mortar::multiplier`]), so that a pressure field p gives F̃_A = ∫ p Φ_A n
+    /// and F̃_A / ∫ Φ_A is a pressure at every node. A quadratic face's own nodal forces are not:
+    /// a uniform pressure gives a tri6's corners none and a quad8's a pull. Linear faces' forces
+    /// are their own (T = I).
+    fn in_multiplier_basis(&self, forces: &[Vec3]) -> Vec<Vec3> {
+        let mut out = forces.to_vec();
+        for &((m, a, b), alpha) in &self.mid_sides {
+            let f = forces.get(m).copied().unwrap_or_default();
+            for c in [a, b] {
+                if let Some(o) = out.get_mut(c) {
+                    (0..3).for_each(|k| o[k] += alpha * f[k]);
+                }
+            }
+            if let Some(o) = out.get_mut(m) {
+                *o = f.map(|v| v * (1.0 - 2.0 * alpha));
+            }
+        }
+        out
+    }
+
     /// How far the augmentation is from converged at `state`, computed with `multipliers`: the
     /// largest gap of a closed node, or the gap equivalent λ_A / ε_A of the multiplier an open
     /// node keeps, over the thickness of the element under the node.
@@ -1195,5 +1478,83 @@ impl Interface {
             worst = worst.max(gap / h);
         }
         worst
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The weighted gaps of a pair of any order, by value.
+    fn gaps(xs: &[Vec3], xm: &[Vec3]) -> [f64; FACE_NODES] {
+        let mut g = [0.0; FACE_NODES];
+        integrate_faces(xs, xm, |p| {
+            for (g, phi) in g.iter_mut().zip(p.multiplier) {
+                *g += p.weight * p.gap() * phi;
+            }
+        })
+        .unwrap();
+        g
+    }
+
+    fn quadratic_face(corners: &[Vec3], bulge: f64) -> Vec<Vec3> {
+        let n = corners.len();
+        let mids = (0..n).map(|k| {
+            let m: Vec3 = std::array::from_fn(|i| 0.5 * (corners[k][i] + corners[(k + 1) % n][i]));
+            [m[0], m[1], m[2] + bulge * (k as f64 + 1.0)]
+        });
+        corners.iter().copied().chain(mids).collect()
+    }
+
+    /// The chain rule of a quadratic pair's gradient and Hessian through its facets, against
+    /// central differences of the weighted gaps, for curved, tilted faces of each order.
+    #[test]
+    fn quadratic_pairs_differentiate_exactly() {
+        let quad = quadratic_face(&[[0.0, 0.0, 0.0], [1.0, 0.05, 0.02], [1.1, 0.9, -0.03], [-0.05, 1.0, 0.01]], 0.01);
+        let tri = quadratic_face(&[[0.0, 0.0, 0.0], [1.1, 0.1, 0.01], [0.2, 1.0, -0.02]], -0.01);
+        let down = |x: &[Vec3]| -> Vec<Vec3> { reversed(x).iter().map(|p| [p[0] + 0.13, p[1] - 0.07, 0.08 - 0.5 * p[2]]).collect() };
+        let linear: Vec<Vec3> = vec![[-0.2, -0.3, 0.12], [-0.25, 1.15, 0.08], [1.2, 1.1, 0.1], [0.9, -0.2, 0.15]];
+        for (xs, xm) in [
+            (&quad, down(&quad)),
+            (&tri, down(&quad)),
+            (&quad, down(&tri)),
+            (&quad, linear.clone()),
+            (&quad[..4].to_vec(), down(&quad)),
+            (&tri[..3].to_vec(), down(&tri)),
+        ] {
+            let (ns, nm) = (xs.len(), xm.len());
+            let p: Vec<f64> = (0..ns).map(|a| 1.0 + 0.1 * a as f64).collect();
+            let (gradient, hessian) = quadratic_terms(xs, &xm, Some(&p)).unwrap();
+            let (plain, none) = quadratic_terms(xs, &xm, None).unwrap();
+            assert!(none.is_none() && plain.iter().flatten().zip(gradient.iter().flatten()).all(|(a, b)| (a - b).abs() < 1e-14));
+            let hessian = hessian.unwrap();
+            let width = 3 * (ns + nm);
+            let shifted = |v: usize, by: f64| {
+                let (mut s, mut m) = (xs.clone(), xm.clone());
+                let (node, k) = (v / 3, v % 3);
+                if node < ns {
+                    s[node][k] += by
+                } else {
+                    m[node - ns][k] += by
+                }
+                (s, m)
+            };
+            let h = 1e-6;
+            for v in 0..width {
+                let ((sp, mp), (sm, mm)) = (shifted(v, h), shifted(v, -h));
+                let (gp, gm) = (gaps(&sp, &mp), gaps(&sm, &mm));
+                for a in 0..ns {
+                    let fd = (gp[a] - gm[a]) / (2.0 * h);
+                    assert!((gradient[a][v] - fd).abs() < 1e-7, "{ns}/{nm}: ∂g_{a}/∂x_{v}: {} vs {fd}", gradient[a][v]);
+                }
+                // The Hessian's row v against differences of the gradient.
+                let (up, _) = quadratic_terms(&sp, &mp, None).unwrap();
+                let (dn, _) = quadratic_terms(&sm, &mm, None).unwrap();
+                for w in 0..width {
+                    let fd: f64 = (0..ns).map(|a| p[a] * (up[a][w] - dn[a][w]) / (2.0 * h)).sum();
+                    assert!((hessian[v * width + w] + fd).abs() < 1e-6, "{ns}/{nm}: H({v}, {w}): {} vs {}", -hessian[v * width + w], fd);
+                }
+            }
+        }
     }
 }
