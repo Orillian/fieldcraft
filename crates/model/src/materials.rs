@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Model, Result, context, finite, insert_new, not_in_use, positive, remove_existing, replace_existing};
+use crate::{Error, Model, Result, context, finite, insert_new, nonnegative, not_in_use, positive, remove_existing, replace_existing};
 
 /// Names of the engineering constants' shear moduli, in order.
 pub(crate) const SHEAR_MODULI: [&str; 3] = ["G12", "G13", "G23"];
@@ -146,22 +146,180 @@ impl Hyperelastic {
     }
 }
 
-/// Fluid behaviour.
+/// The largest flow behaviour index n a shear-dependent fluid takes (beyond any fluid in use; a
+/// bound keeps the powers of the shear rate finite).
+pub const MAX_FLOW_INDEX: f64 = 5.0;
+
+/// The largest Yasuda exponent a of the Carreau–Yasuda model (2 is Carreau's).
+pub const MAX_YASUDA: f64 = 10.0;
+
+/// The shear rate at which a power-law fluid's `consistency` is its viscosity when
+/// `reference_shear_rate` is left out: 1/s, so the consistency K in Pa·sⁿ is the same number in
+/// Pa·s.
+const POWER_LAW_REFERENCE_RATE: f64 = 1.0;
+
+/// Fluid behaviour: the dynamic viscosity η, constant (Newtonian) or a function of the local
+/// shear rate γ̇ = √(2 S:S) (generalised Newtonian), and for Cross-WLF of the temperature.
+///
+/// - Power law (W. Ostwald 1925; A. de Waele 1923): η = K (γ̇/γ̇_ref)^(n−1).
+/// - Carreau–Yasuda (P. J. Carreau, Trans. Soc. Rheol. 16(1):99–127, 1972; K. Yasuda, R. C.
+///   Armstrong, R. E. Cohen, Rheol. Acta 20:163–178, 1981):
+///   η = η∞ + (η₀ − η∞) [1 + (λγ̇)ᵃ]^((n−1)/a).
+/// - Cross (M. M. Cross, J. Colloid Sci. 20(5):417–437, 1965): η = η₀ / (1 + (λγ̇)^(1−n)).
+/// - Cross-WLF (C. A. Hieber, S. F. Shen, J. Non-Newtonian Fluid Mech. 7:1–32, 1980, with the
+///   shift of M. L. Williams, R. F. Landel, J. D. Ferry, J. Am. Chem. Soc. 77:3701–3707, 1955):
+///   η = η₀(T) / (1 + (η₀(T) γ̇ / τ*)^(1−n)), η₀(T) = D₁ exp(−A₁ (T − D₂) / (A₂ + T − D₂)), and
+///   η₀ unbounded (the melt frozen) at and below T = D₂ − A₂.
+///
+/// Bird, Armstrong and Hassager, *Dynamics of Polymeric Liquids* vol. 1 (2nd ed., Wiley 1987),
+/// ch. 4, collect these models.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Fluid {
     /// A Newtonian fluid of this dynamic viscosity μ (shear stress per shear rate; for example
     /// 1.0e-9 MPa·s for water in mm, t, s). Its kinematic viscosity is μ over the density.
     Newtonian { viscosity: f64 },
+    /// Power law: `consistency` K is the viscosity at `reference_shear_rate` (1/s when left
+    /// out, so K in Pa·sⁿ), `index` n the flow behaviour index (below 1 shear-thinning, above 1
+    /// shear-thickening, 1 Newtonian).
+    PowerLaw {
+        consistency: f64,
+        index: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference_shear_rate: Option<f64>,
+    },
+    /// Carreau–Yasuda: the plateaus `zero_shear_viscosity` η₀ and `infinite_shear_viscosity` η∞
+    /// (0 when left out; at most η₀), the `time_constant` λ, the Yasuda exponent `a` (2 when left
+    /// out: Carreau) and the power-law index n.
+    CarreauYasuda {
+        zero_shear_viscosity: f64,
+        #[serde(default)]
+        infinite_shear_viscosity: f64,
+        time_constant: f64,
+        #[serde(default = "two")]
+        a: f64,
+        index: f64,
+    },
+    /// Cross: the plateau `zero_shear_viscosity` η₀, the `time_constant` λ and the index n
+    /// (0 < n < 1).
+    Cross { zero_shear_viscosity: f64, time_constant: f64, index: f64 },
+    /// Cross-WLF, for polymer melts: `d1` the zero-shear viscosity at `d2` (the WLF reference
+    /// temperature, usually the glass transition), `a1` and `a2` the WLF constants (`a2` a
+    /// temperature difference), `critical_stress` τ* where shear-thinning sets in, and the index
+    /// n (0 < n < 1). It needs the fluid's temperature: a fluid domain with heat.
+    CrossWlf { d1: f64, d2: f64, a1: f64, a2: f64, critical_stress: f64, index: f64 },
+}
+
+fn two() -> f64 {
+    2.0
 }
 
 impl Fluid {
-    /// The dynamic viscosity μ.
-    pub fn viscosity(&self) -> f64 {
-        match *self {
-            Fluid::Newtonian { viscosity } => viscosity,
+    /// The name of the model, for messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Fluid::Newtonian { .. } => "Newtonian",
+            Fluid::PowerLaw { .. } => "power-law",
+            Fluid::CarreauYasuda { .. } => "Carreau–Yasuda",
+            Fluid::Cross { .. } => "Cross",
+            Fluid::CrossWlf { .. } => "Cross-WLF",
         }
     }
+
+    /// The dynamic viscosity μ of a Newtonian fluid; `None` for a shear-dependent one.
+    pub fn newtonian(&self) -> Option<f64> {
+        match *self {
+            Fluid::Newtonian { viscosity } => Some(viscosity),
+            _ => None,
+        }
+    }
+
+    /// Whether the viscosity depends on the temperature (the solve needs the fluid's heat).
+    pub fn needs_temperature(&self) -> bool {
+        matches!(self, Fluid::CrossWlf { .. })
+    }
+
+    /// The dynamic viscosity at shear rate `shear_rate` (≥ 0) and absolute temperature
+    /// `temperature` (kelvin; only Cross-WLF reads it). It may be infinite (a shear-thinning
+    /// power law at rest, a frozen Cross-WLF melt) or zero (a shear-thickening power law at
+    /// rest); a solver bounds it.
+    pub fn viscosity(&self, shear_rate: f64, temperature: f64) -> f64 {
+        let rate = shear_rate.max(0.0);
+        match *self {
+            Fluid::Newtonian { viscosity } => viscosity,
+            Fluid::PowerLaw { consistency, index, reference_shear_rate } => {
+                consistency * (rate / reference_shear_rate.unwrap_or(POWER_LAW_REFERENCE_RATE)).powf(index - 1.0)
+            }
+            Fluid::CarreauYasuda { zero_shear_viscosity, infinite_shear_viscosity, time_constant, a, index } => {
+                let shape = (1.0 + (time_constant * rate).powf(a)).powf((index - 1.0) / a);
+                infinite_shear_viscosity + (zero_shear_viscosity - infinite_shear_viscosity) * shape
+            }
+            Fluid::Cross { zero_shear_viscosity, time_constant, index } => cross(zero_shear_viscosity, time_constant * rate, index),
+            Fluid::CrossWlf { d1, d2, a1, a2, critical_stress, index } => {
+                let above = temperature - d2;
+                let eta0 = if a2 + above > 0.0 { d1 * (-a1 * above / (a2 + above)).exp() } else { f64::INFINITY };
+                if eta0.is_finite() { cross(eta0, eta0 * rate / critical_stress, index) } else { f64::INFINITY }
+            }
+        }
+    }
+
+    /// Check the constants: every viscosity, time and stress positive (η∞ may be 0), the indices
+    /// in their ranges.
+    pub fn validate(&self) -> Result<()> {
+        // The index n is above 0 and at most `max` (below it when not `inclusive`).
+        let index = |n: f64, max: f64, inclusive: bool| {
+            if n > 0.0 && (n < max || (inclusive && n == max)) {
+                Ok(())
+            } else {
+                let bound = if inclusive { "at most" } else { "below" };
+                Err(Error::Invalid(format!("the {} index n must be above 0 and {bound} {max}, got {n}", self.name())))
+            }
+        };
+        match *self {
+            Fluid::Newtonian { viscosity } => {
+                positive("viscosity", viscosity)?;
+            }
+            Fluid::PowerLaw { consistency, index: n, reference_shear_rate } => {
+                positive("consistency", consistency)?;
+                index(n, MAX_FLOW_INDEX, true)?;
+                if let Some(r) = reference_shear_rate {
+                    positive("reference shear rate", r)?;
+                }
+            }
+            Fluid::CarreauYasuda { zero_shear_viscosity, infinite_shear_viscosity, time_constant, a, index: n } => {
+                positive("zero-shear viscosity", zero_shear_viscosity)?;
+                if !(infinite_shear_viscosity >= 0.0 && infinite_shear_viscosity <= zero_shear_viscosity) {
+                    return Err(Error::Invalid(format!(
+                        "the infinite-shear viscosity must be from 0 to the zero-shear viscosity {zero_shear_viscosity}, got {infinite_shear_viscosity}"
+                    )));
+                }
+                positive("time constant", time_constant)?;
+                if !(a > 0.0 && a <= MAX_YASUDA) {
+                    return Err(Error::Invalid(format!("the Yasuda exponent a must be above 0 and at most {MAX_YASUDA}, got {a}")));
+                }
+                index(n, MAX_FLOW_INDEX, true)?;
+            }
+            Fluid::Cross { zero_shear_viscosity, time_constant, index: n } => {
+                positive("zero-shear viscosity", zero_shear_viscosity)?;
+                positive("time constant", time_constant)?;
+                index(n, 1.0, false)?;
+            }
+            Fluid::CrossWlf { d1, d2, a1, a2, critical_stress, index: n } => {
+                positive("D1", d1)?;
+                positive("D2", d2)?;
+                nonnegative("A1", a1)?;
+                positive("A2", a2)?;
+                positive("critical stress τ*", critical_stress)?;
+                index(n, 1.0, false)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Cross's `η₀ / (1 + x^(1−n))` at `x` = λγ̇.
+fn cross(eta0: f64, x: f64, n: f64) -> f64 {
+    eta0 / (1.0 + x.powf(1.0 - n))
 }
 
 /// Most points of a plastic hardening table.
@@ -261,9 +419,6 @@ impl Plastic {
     }
 
     pub fn validate(&self) -> Result<()> {
-        let nonnegative = |what: &str, v: f64| {
-            if v >= 0.0 && v.is_finite() { Ok(v) } else { Err(Error::Invalid(format!("{what} must be a finite number ≥ 0, got {v}"))) }
-        };
         match self {
             Plastic::Bilinear { yield_stress, hardening_modulus, .. } => {
                 positive("yield stress", *yield_stress)?;
@@ -443,7 +598,7 @@ impl Material {
             return Err(Error::Invalid("a material needs elastic constants, a density, fluid behaviour or thermal properties".into()));
         }
         if let Some(f) = &self.fluid {
-            positive("viscosity", f.viscosity())?;
+            f.validate()?;
             if self.density.is_none() {
                 return Err(Error::Invalid("a fluid needs a density".into()));
             }
@@ -565,6 +720,109 @@ mod tests {
         m.replace_material("Steel", iso(2.0e5, 0.29)).unwrap();
         assert!(m.replace_material("Nope", iso(2.0e5, 0.29)).is_err());
         assert_eq!(m.materials().len(), 2);
+    }
+
+    fn power_law(consistency: f64, index: f64) -> Fluid {
+        Fluid::PowerLaw { consistency, index, reference_shear_rate: None }
+    }
+
+    fn carreau(a: f64, index: f64) -> Fluid {
+        Fluid::CarreauYasuda { zero_shear_viscosity: 10.0, infinite_shear_viscosity: 0.1, time_constant: 2.0, a, index }
+    }
+
+    fn cross_wlf() -> Fluid {
+        // A polymer melt's constants, in SI (Pa·s, K, K, Pa).
+        Fluid::CrossWlf { d1: 1.0e12, d2: 373.0, a1: 28.0, a2: 51.6, critical_stress: 3.0e4, index: 0.3 }
+    }
+
+    #[test]
+    fn shear_dependent_viscosities_follow_their_models() {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs();
+        // Power law: K (γ̇/γ̇_ref)^(n−1); K is the viscosity at the reference rate.
+        assert!(close(power_law(2.0, 0.5).viscosity(4.0, 0.0), 1.0));
+        assert!(close(power_law(2.0, 1.5).viscosity(4.0, 0.0), 4.0));
+        assert!(close(power_law(2.0, 1.0).viscosity(123.0, 0.0), 2.0), "n = 1 is Newtonian");
+        let shifted = Fluid::PowerLaw { consistency: 2.0, index: 0.5, reference_shear_rate: Some(4.0) };
+        assert!(close(shifted.viscosity(4.0, 0.0), 2.0) && close(shifted.viscosity(16.0, 0.0), 1.0));
+        assert_eq!(power_law(2.0, 0.5).viscosity(0.0, 0.0), f64::INFINITY, "shear-thinning at rest");
+        assert_eq!(power_law(2.0, 1.5).viscosity(0.0, 0.0), 0.0, "shear-thickening at rest");
+        // Carreau–Yasuda: the plateaus at both ends, the power law between.
+        for a in [0.5, 2.0, 5.0] {
+            let f = carreau(a, 0.4);
+            assert!(close(f.viscosity(0.0, 0.0), 10.0), "η₀");
+            assert!((f.viscosity(1e-20, 0.0) - 10.0).abs() < 1e-6);
+            assert!((f.viscosity(1e15, 0.0) - 0.1).abs() < 1e-3, "η∞");
+            // Far above 1/λ: η − η∞ → (η₀ − η∞) (λγ̇)^(n−1).
+            let g = 1e6;
+            assert!(((f.viscosity(g, 0.0) - 0.1) / (9.9 * (2.0 * g).powf(-0.6)) - 1.0).abs() < 1e-3, "a = {a}");
+        }
+        let flat = Fluid::CarreauYasuda { zero_shear_viscosity: 3.0, infinite_shear_viscosity: 3.0, time_constant: 1.0, a: 2.0, index: 0.3 };
+        assert!(close(flat.viscosity(7.0, 0.0), 3.0), "η₀ = η∞ is Newtonian");
+        assert!(close(carreau(2.0, 1.0).viscosity(7.0, 0.0), 10.0), "n = 1 is Newtonian at η₀");
+        // Cross: half the plateau at λγ̇ = 1.
+        let cross = Fluid::Cross { zero_shear_viscosity: 8.0, time_constant: 0.5, index: 0.3 };
+        assert!(close(cross.viscosity(0.0, 0.0), 8.0) && close(cross.viscosity(2.0, 0.0), 4.0));
+        // Cross-WLF: η₀ = D1 at T = D2, falling with the temperature; frozen at T ≤ D2 − A2.
+        let melt = cross_wlf();
+        assert!(close(melt.viscosity(0.0, 373.0), 1.0e12));
+        let eta0 = 1.0e12 * (-28.0 * 150.0 / (51.6 + 150.0_f64)).exp();
+        assert!(close(melt.viscosity(0.0, 523.0), eta0));
+        let rate = 3.0e4 / eta0;
+        assert!(close(melt.viscosity(rate, 523.0), eta0 / 2.0), "half η₀ at η₀ γ̇ = τ*");
+        assert!(melt.viscosity(1.0, 523.0) < melt.viscosity(1.0, 493.0), "hotter flows more easily");
+        assert_eq!(melt.viscosity(1.0, 373.0 - 51.6), f64::INFINITY);
+        assert_eq!(melt.viscosity(1.0, 300.0), f64::INFINITY);
+        assert!(melt.needs_temperature() && !power_law(1.0, 0.5).needs_temperature());
+        assert_eq!(Fluid::Newtonian { viscosity: 2.0 }.newtonian(), Some(2.0));
+        assert_eq!(power_law(1.0, 1.0).newtonian(), None);
+    }
+
+    #[test]
+    fn shear_dependent_fluids_validate_and_name_the_bad_constant() {
+        let ok = |f: Fluid| Material { density: Some(1.0), fluid: Some(f), ..Material::default() }.validate();
+        for good in [power_law(1.0, 0.3), power_law(1.0, MAX_FLOW_INDEX), carreau(2.0, 0.3), carreau(2.0, 1.4), cross_wlf()] {
+            ok(good).unwrap();
+        }
+        ok(Fluid::Cross { zero_shear_viscosity: 1.0, time_constant: 1.0, index: 0.5 }).unwrap();
+        for (bad, says) in [
+            (power_law(0.0, 0.5), "consistency"),
+            (power_law(1.0, 0.0), "index"),
+            (power_law(1.0, MAX_FLOW_INDEX * 1.01), "index"),
+            (power_law(1.0, f64::NAN), "index"),
+            (Fluid::PowerLaw { consistency: 1.0, index: 0.5, reference_shear_rate: Some(-1.0) }, "reference shear rate"),
+            (carreau(0.0, 0.5), "Yasuda"),
+            (carreau(f64::INFINITY, 0.5), "Yasuda"),
+            (
+                Fluid::CarreauYasuda { zero_shear_viscosity: 1.0, infinite_shear_viscosity: 2.0, time_constant: 1.0, a: 2.0, index: 0.5 },
+                "infinite-shear",
+            ),
+            (
+                Fluid::CarreauYasuda { zero_shear_viscosity: 1.0, infinite_shear_viscosity: -1.0, time_constant: 1.0, a: 2.0, index: 0.5 },
+                "infinite-shear",
+            ),
+            (
+                Fluid::CarreauYasuda { zero_shear_viscosity: 1.0, infinite_shear_viscosity: 0.0, time_constant: 0.0, a: 2.0, index: 0.5 },
+                "time constant",
+            ),
+            (Fluid::Cross { zero_shear_viscosity: 1.0, time_constant: 1.0, index: 1.0 }, "index"),
+            (Fluid::Cross { zero_shear_viscosity: f64::NAN, time_constant: 1.0, index: 0.5 }, "zero-shear"),
+            (wlf(|c| c[2] = -1.0), "A1"),
+            (wlf(|c| c[3] = 0.0), "A2"),
+            (wlf(|c| c[4] = f64::INFINITY), "τ*"),
+            (wlf(|c| c[1] = f64::NAN), "D2"),
+        ] {
+            let e = ok(bad).unwrap_err().to_string();
+            assert!(e.contains(says), "{bad:?}: {e}");
+        }
+    }
+
+    /// [`cross_wlf`] with its constants `[d1, d2, a1, a2, τ*, n]` changed.
+    fn wlf(change: impl Fn(&mut [f64; 6])) -> Fluid {
+        let Fluid::CrossWlf { d1, d2, a1, a2, critical_stress, index } = cross_wlf() else { return cross_wlf() };
+        let mut c = [d1, d2, a1, a2, critical_stress, index];
+        change(&mut c);
+        let [d1, d2, a1, a2, critical_stress, index] = c;
+        Fluid::CrossWlf { d1, d2, a1, a2, critical_stress, index }
     }
 
     #[test]

@@ -41,8 +41,31 @@ impl Quantities for Material {
         if let Some(rho) = density {
             f(Q::Density, rho);
         }
-        if let Some(Fluid::Newtonian { viscosity }) = fluid {
-            f(Q::DynamicViscosity, viscosity);
+        match fluid {
+            Some(Fluid::Newtonian { viscosity }) => f(Q::DynamicViscosity, viscosity),
+            Some(Fluid::PowerLaw { consistency, index: _, reference_shear_rate }) => {
+                // The consistency is the viscosity at the reference rate (1/s when left out).
+                f(Q::DynamicViscosity, consistency);
+                if let Some(r) = reference_shear_rate {
+                    f(Q::StrainRate, r);
+                }
+            }
+            Some(Fluid::CarreauYasuda { zero_shear_viscosity, infinite_shear_viscosity, time_constant, a: _, index: _ }) => {
+                f(Q::DynamicViscosity, zero_shear_viscosity);
+                f(Q::DynamicViscosity, infinite_shear_viscosity);
+                f(Q::Time, time_constant);
+            }
+            Some(Fluid::Cross { zero_shear_viscosity, time_constant, index: _ }) => {
+                f(Q::DynamicViscosity, zero_shear_viscosity);
+                f(Q::Time, time_constant);
+            }
+            Some(Fluid::CrossWlf { d1, d2, a1: _, a2, critical_stress, index: _ }) => {
+                f(Q::DynamicViscosity, d1);
+                f(Q::Temperature, d2);
+                f(Q::TemperatureDifference, a2);
+                f(Q::Pressure, critical_stress);
+            }
+            None => {}
         }
         match plastic {
             Some(Plastic::Bilinear { yield_stress, hardening_modulus, hardening: _ }) => {

@@ -424,6 +424,11 @@ pub(crate) fn positive(what: &str, v: f64) -> Result<f64> {
     if v > 0.0 && v.is_finite() { Ok(v) } else { Err(Error::Invalid(format!("{what} must be a positive number, got {v}"))) }
 }
 
+/// Check that a value is a finite number of at least zero, naming it in the error.
+pub(crate) fn nonnegative(what: &str, v: f64) -> Result<f64> {
+    if v >= 0.0 && v.is_finite() { Ok(v) } else { Err(Error::Invalid(format!("{what} must be a finite number ≥ 0, got {v}"))) }
+}
+
 /// Add a new definition under a fresh, valid name.
 fn insert_new<T>(map: &mut BTreeMap<String, T>, what: &str, name: &str, value: T) -> Result<()> {
     check_name(what, name)?;

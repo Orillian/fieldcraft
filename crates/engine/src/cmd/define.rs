@@ -95,7 +95,7 @@ definition_commands!(
     Material,
     "material",
     "Material",
-    r#"{"name": "Steel", "elastic": {"type": "isotropic", "young": 210000, "poisson": 0.3} | {"type": "engineering_constants", "young": [E1, E2, E3], "poisson": [ν12, ν13, ν23], "shear": [G12, G13, G23]}, "density": 7.85e-9, "fluid": {"type": "newtonian", "viscosity": 1.0e-9} (dynamic viscosity; a fluid needs a density), "plastic": {…} (see model.material.plasticity), "damage": {…}, "erosion": {…} (see model.material.damage), "hyperelastic": {"type": "neo_hookean"} | {"type": "mooney_rivlin", "c01": 0.1} (C10 = μ/2 − C01) | {"type": "yeoh", "c20": -0.01, "c30": 0.001} (C10 = μ/2) (large strain in nonlinear steps, from the isotropic constants: μ = E/(2(1 + ν)), κ = E/(3(1 − 2ν)); without it an elastic material is St Venant–Kirchhoff there), "thermal": {"conductivity": 0.05 | [kx, ky, kz], "specific_heat": 4.6e8, "expansion": 1.2e-5 | [αx, αy, αz], "reference_temperature": 20 (zero thermal strain; default 0 °C)} (heat transfer and thermal strain; each key optional)} — numbers in the display units (model.units), or with their unit ("210 GPa")"#,
+    r#"{"name": "Steel", "elastic": {"type": "isotropic", "young": 210000, "poisson": 0.3} | {"type": "engineering_constants", "young": [E1, E2, E3], "poisson": [ν12, ν13, ν23], "shear": [G12, G13, G23]}, "density": 7.85e-9, "fluid": {"type": "newtonian", "viscosity": 1.0e-9} (dynamic viscosity) | {"type": "power_law", "consistency": K, "index": n, "reference_shear_rate"?: 1 (default 1/s)} (η = K (γ̇/γ̇_ref)^(n−1): K is the viscosity at the reference rate) | {"type": "carreau_yasuda", "zero_shear_viscosity": η₀, "infinite_shear_viscosity"?: η∞ (default 0, at most η₀), "time_constant": λ, "a"?: 2, "index": n} (η = η∞ + (η₀ − η∞) (1 + (λγ̇)^a)^((n−1)/a)) | {"type": "cross", "zero_shear_viscosity": η₀, "time_constant": λ, "index": n (0 < n < 1)} (η = η₀ / (1 + (λγ̇)^(1−n))) | {"type": "cross_wlf", "d1", "d2" (temperature), "a1", "a2" (temperature difference), "critical_stress": τ*, "index": n (0 < n < 1)} (η = η₀ / (1 + (η₀ γ̇/τ*)^(1−n)), η₀ = D1 exp(−A1 (T − D2) / (A2 + T − D2)); needs heat in the fluid domain) (γ̇ the local shear rate; n from 0 to 5; a fluid needs a density), "plastic": {…} (see model.material.plasticity), "damage": {…}, "erosion": {…} (see model.material.damage), "hyperelastic": {"type": "neo_hookean"} | {"type": "mooney_rivlin", "c01": 0.1} (C10 = μ/2 − C01) | {"type": "yeoh", "c20": -0.01, "c30": 0.001} (C10 = μ/2) (large strain in nonlinear steps, from the isotropic constants: μ = E/(2(1 + ν)), κ = E/(3(1 − 2ν)); without it an elastic material is St Venant–Kirchhoff there), "thermal": {"conductivity": 0.05 | [kx, ky, kz], "specific_heat": 4.6e8, "expansion": 1.2e-5 | [αx, αy, αz], "reference_temperature": 20 (zero thermal strain; default 0 °C)} (heat transfer and thermal strain; each key optional)} — numbers in the display units (model.units), or with their unit ("210 GPa")"#,
     super::forms::MATERIAL,
     super::forms::MATERIAL_DELETE,
     add_material,
@@ -564,6 +564,62 @@ pub(crate) mod tests {
             {"command": "model.step.create", "params": {"name": "Modes", "procedure": {"type": "frequency", "modes": 6}, "boundary_conditions": ["clamp"]}},
         ]);
         s.run_script(&script).unwrap();
+    }
+
+    /// Shear-dependent fluids take their constants in the display units (or with their own) and
+    /// store them in SI; the edit form shows them back as typed.
+    #[test]
+    fn shear_dependent_fluids_store_si_and_show_in_display_units() {
+        use fieldcraft_model::Fluid;
+        let mut s = Session::default();
+        s.execute("model.units", &json!({"system": "mm-kg-ms-kN-GPa"})).unwrap();
+        let fluid = |s: &Session, name: &str| s.model.material(name).and_then(|m| m.fluid);
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs();
+        let create = |s: &mut Session, name: &str, fluid: serde_json::Value| {
+            s.execute("model.material.create", &json!({"name": name, "density": "1000 kg/m^3", "fluid": fluid})).unwrap();
+        };
+        // GPa·ms is 1e6 Pa·s; 1/ms is 1000/s; ms is 1e-3 s.
+        create(&mut s, "Paint", json!({"type": "power_law", "consistency": "12 Pa*s", "index": 0.4, "reference_shear_rate": 2}));
+        create(
+            &mut s,
+            "Blood",
+            json!({"type": "carreau_yasuda", "zero_shear_viscosity": 5.6e-8, "infinite_shear_viscosity": "3.45e-3 Pa*s", "time_constant": 3313, "index": 0.3568}),
+        );
+        create(&mut s, "Melt", json!({"type": "cross", "zero_shear_viscosity": "1000 Pa*s", "time_constant": "0.2 s", "index": 0.3}));
+        s.execute("model.units", &json!({"system": "m-kg-s-N-Pa"})).unwrap();
+        let Some(Fluid::PowerLaw { consistency, index, reference_shear_rate: Some(rate) }) = fluid(&s, "Paint") else {
+            panic!("{:?}", fluid(&s, "Paint"))
+        };
+        assert!(close(consistency, 12.0) && index == 0.4 && close(rate, 2000.0));
+        let Some(Fluid::CarreauYasuda { zero_shear_viscosity, infinite_shear_viscosity, time_constant, a, .. }) = fluid(&s, "Blood") else {
+            panic!()
+        };
+        assert!(close(zero_shear_viscosity, 0.056) && close(infinite_shear_viscosity, 3.45e-3) && close(time_constant, 3.313) && a == 2.0);
+        let Some(Fluid::Cross { zero_shear_viscosity, time_constant, .. }) = fluid(&s, "Melt") else { panic!() };
+        assert!(close(zero_shear_viscosity, 1000.0) && close(time_constant, 0.2));
+        // Cross-WLF: an absolute temperature (with the scale's offset) and a difference (without).
+        s.execute("model.units", &json!({"system": "mm-t-s-N-MPa"})).unwrap();
+        let wlf = json!({"type": "cross_wlf", "d1": 1e6, "d2": 100, "a1": 28, "a2": 51.6, "critical_stress": 0.03, "index": 0.3});
+        create(&mut s, "Pc", wlf.clone());
+        let Some(Fluid::CrossWlf { d1, d2, a2, critical_stress, .. }) = fluid(&s, "Pc") else { panic!() };
+        assert!(close(d1, 1e12) && close(d2, 373.15) && close(a2, 51.6) && close(critical_stress, 3e4), "{:?}", fluid(&s, "Pc"));
+        let shown = crate::units::shown_params("model.material.create", &serde_json::to_value(s.model.material("Pc")).unwrap(), s.units()).unwrap();
+        for key in ["d1", "d2", "a1", "a2", "critical_stress"] {
+            assert!(close(shown["fluid"][key].as_f64().unwrap(), wlf[key].as_f64().unwrap()), "{key}: {shown}");
+        }
+        // Constants out of range are refused by name.
+        for (bad, says) in [
+            (json!({"type": "power_law", "consistency": 1, "index": 6}), "index"),
+            (
+                json!({"type": "carreau_yasuda", "zero_shear_viscosity": 1, "infinite_shear_viscosity": 2, "time_constant": 1, "index": 0.5}),
+                "infinite-shear",
+            ),
+            (json!({"type": "cross", "zero_shear_viscosity": 1, "time_constant": 1, "index": 1.2}), "index"),
+            (json!({"type": "power_law", "consistency": "1 m", "index": 0.5}), "consistency"),
+        ] {
+            let e = s.execute("model.material.create", &json!({"name": "Bad", "density": 1, "fluid": bad})).unwrap_err().to_string();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
     }
 
     /// A rename rewrites the references, checks clean, is undone in one step, follows the hidden

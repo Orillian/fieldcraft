@@ -458,7 +458,14 @@ impl Setup {
         let (Some(density), Some(fluid)) = (material.and_then(|m| m.density), material.and_then(|m| m.fluid)) else {
             return Err(Error::Invalid(format!("material `{}` needs a density and fluid behaviour", domain.material)));
         };
-        let viscosity = fluid.viscosity() / density;
+        let Some(mu) = fluid.newtonian() else {
+            return Err(Error::Invalid(format!(
+                "material `{}` has a {} viscosity: the lattice Boltzmann solver does not support shear-dependent viscosity yet",
+                domain.material,
+                fluid.name()
+            )));
+        };
+        let viscosity = mu / density;
         if !(viscosity > 0.0 && viscosity.is_finite()) {
             return Err(Error::Invalid(format!("the kinematic viscosity μ/ρ of material `{}` is {viscosity}", domain.material)));
         }

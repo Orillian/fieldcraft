@@ -584,8 +584,14 @@ fn material_fits_solid(m: &Material, name: &str) -> Result<()> {
 /// What a fluid domain needs of its material: a density and fluid behaviour, and with heat a
 /// positive isotropic conductivity and specific heat (the diffusivity k / (ρ c)).
 fn material_fits_fluid_domain(m: &Material, name: &str, d: &FluidDomain) -> Result<()> {
-    if m.fluid.is_none() {
+    let Some(fluid) = m.fluid else {
         return Err(Error::Invalid(format!("material `{name}` has no fluid behaviour (a viscosity)")));
+    };
+    if fluid.needs_temperature() && d.thermal.is_none() {
+        return Err(Error::Invalid(format!(
+            "material `{name}` has a {} viscosity, which depends on the temperature: give the fluid domain heat (`thermal`)",
+            fluid.name()
+        )));
     }
     if m.density.is_none() {
         return Err(Error::Invalid(format!("material `{name}` has no density")));
@@ -920,6 +926,27 @@ mod tests {
             porous: vec![],
             fans: vec![],
         }
+    }
+
+    /// A Cross-WLF melt's viscosity depends on the temperature: its domain needs heat, and the
+    /// heat cannot be taken away from it.
+    #[test]
+    fn a_temperature_dependent_viscosity_needs_heat_in_the_domain() {
+        let mut m = Model::default();
+        let melt = Fluid::CrossWlf { d1: 1.0e12, d2: 373.0, a1: 28.0, a2: 51.6, critical_stress: 3.0e4, index: 0.3 };
+        let heat = crate::Thermal { conductivity: Some(Directional::Isotropic(0.2)), specific_heat: Some(2000.0), ..Default::default() };
+        m.add_material("Water", Material { density: Some(900.0), fluid: Some(melt), thermal: Some(heat), ..Material::default() }).unwrap();
+        let e = m.add_fluid_domain("Flow", channel()).unwrap_err().to_string();
+        assert!(e.contains("Cross-WLF") && e.contains("thermal"), "{e}");
+        let mut hot = channel();
+        hot.thermal = Some(FluidThermal { initial_temperature: 500.0, ..FluidThermal::default() });
+        m.add_fluid_domain("Flow", hot).unwrap();
+        assert!(m.replace_fluid_domain("Flow", channel()).is_err(), "heat stays while the melt fills the domain");
+        // A shear-thinning fluid that ignores the temperature needs none.
+        let mut n = Model::default();
+        n.add_material("Water", Material { fluid: Some(Fluid::PowerLaw { consistency: 1.0, index: 0.5, reference_shear_rate: None }), ..water() })
+            .unwrap();
+        n.add_fluid_domain("Flow", channel()).unwrap();
     }
 
     #[test]

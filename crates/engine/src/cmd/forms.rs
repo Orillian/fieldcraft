@@ -229,13 +229,62 @@ pub const MATERIAL: &[Field] = &[
     variants(
         "fluid",
         "Fluid",
-        &[variant(
-            "newtonian",
-            "Newtonian",
-            &[positive("viscosity", "Viscosity", D::Viscosity).help("Dynamic viscosity. Water ≈ 1e-3 Pa·s (1e-9 MPa·s), air ≈ 1.8e-5 Pa·s.").req()],
-        )],
+        &[
+            variant(
+                "newtonian",
+                "Newtonian",
+                &[positive("viscosity", "Viscosity", D::Viscosity).help("Dynamic viscosity. Water ≈ 1e-3 Pa·s (1e-9 MPa·s), air ≈ 1.8e-5 Pa·s.").req()],
+            ),
+            variant(
+                "power_law",
+                "Power law",
+                &[
+                    positive("consistency", "Consistency K", D::Viscosity)
+                        .help("The viscosity at the reference shear rate (K in Pa·sⁿ is the viscosity at 1/s).")
+                        .req(),
+                    positive("index", "Index n", D::None).help("Flow behaviour index: below 1 shear-thinning, above 1 shear-thickening.").req(),
+                    positive("reference_shear_rate", "Reference shear rate", D::StrainRate)
+                        .help("The shear rate the consistency is the viscosity at.")
+                        .hint("1/s"),
+                ],
+            ),
+            variant(
+                "carreau_yasuda",
+                "Carreau–Yasuda",
+                &[
+                    positive("zero_shear_viscosity", "Zero-shear viscosity η₀", D::Viscosity).help("The viscosity at rest.").req(),
+                    positive("infinite_shear_viscosity", "Infinite-shear viscosity η∞", D::Viscosity)
+                        .help("The viscosity at very high shear rates, at most η₀.")
+                        .hint("0"),
+                    positive("time_constant", "Time constant λ", D::Time).help("1/λ is the shear rate where shear-thinning sets in.").req(),
+                    positive("a", "Yasuda exponent a", D::None).help("How sharp the transition between the plateau and the power law is; 2 is Carreau's model.").hint("2"),
+                    positive("index", "Index n", D::None).help("Power-law index of the shear-thinning part.").req(),
+                ],
+            ),
+            variant(
+                "cross",
+                "Cross",
+                &[
+                    positive("zero_shear_viscosity", "Zero-shear viscosity η₀", D::Viscosity).help("The viscosity at rest.").req(),
+                    positive("time_constant", "Time constant λ", D::Time).help("The viscosity is half η₀ at the shear rate 1/λ.").req(),
+                    positive("index", "Index n", D::None).help("Power-law index of the shear-thinning part, between 0 and 1.").req(),
+                ],
+            ),
+            variant(
+                "cross_wlf",
+                "Cross-WLF",
+                &[
+                    positive("d1", "D1", D::Viscosity).help("The zero-shear viscosity at the reference temperature D2.").req(),
+                    num("d2", "D2", D::Temperature).help("The WLF reference temperature, usually the glass transition.").req(),
+                    positive("a1", "A1", D::None).help("The WLF shift's first constant.").req(),
+                    positive("a2", "A2", D::TemperatureDifference).help("The WLF shift's second constant; the melt is frozen at D2 − A2.").req(),
+                    positive("critical_stress", "Critical stress τ*", D::Stress).help("The shear stress where shear-thinning sets in.").req(),
+                    positive("index", "Index n", D::None).help("Power-law index of the shear-thinning part, between 0 and 1.").req(),
+                ],
+            ),
+        ],
     )
-    .help("Makes the material a fluid for a lattice Boltzmann flow analysis.")
+    .help("Makes the material a fluid for a lattice Boltzmann flow analysis: a constant viscosity, or one that depends on the shear rate (and for Cross-WLF on the temperature, which needs heat in the fluid).")
     .hint("a fluid needs a density"),
 ];
 
