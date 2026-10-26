@@ -83,11 +83,11 @@ impl<T: Real> Sample<T> {
     }
 }
 
-fn sub<T: Real>(a: Point<T>, b: Point<T>) -> Point<T> {
+pub fn sub<T: Real>(a: Point<T>, b: Point<T>) -> Point<T> {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn dot<T: Real>(a: Point<T>, b: Point<T>) -> T {
+pub fn dot<T: Real>(a: Point<T>, b: Point<T>) -> T {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
@@ -263,11 +263,22 @@ fn shape_at<T: Real>(p: &[Flat<T>], y: Flat<T>) -> Option<[T; 4]> {
     }
 }
 
-fn interpolate<T: Real>(x: &[Point<T>], n: &[T; 4]) -> Point<T> {
+fn interpolate<T: Real>(x: &[Point<T>], n: &[T]) -> Point<T> {
     let mut out = [T::cst(0.0); 3];
     for (xi, ni) in x.iter().zip(n) {
         for k in 0..3 {
             out[k] = out[k] + xi[k] * *ni;
+        }
+    }
+    out
+}
+
+/// Σ N_i x_i of fixed points `x` with weights over any scalar.
+pub fn interpolate_fixed<T: Real>(x: &[[f64; 3]], n: &[T]) -> Point<T> {
+    let mut out = [T::cst(0.0); 3];
+    for (xi, ni) in x.iter().zip(n) {
+        for k in 0..3 {
+            out[k] = out[k] + *ni * xi[k];
         }
     }
     out
@@ -334,6 +345,271 @@ pub fn integrate<T: Real>(secondary: &[Point<T>], main: &[Point<T>], mut f: impl
                     });
                 }
             }
+        }
+    }
+    Some(())
+}
+
+/// Most nodes of a face (quad8).
+pub const FACE_NODES: usize = 8;
+
+/// The coefficient α of the multiplier basis of a quadratic secondary face of `count` nodes
+/// ([`multiplier`]): 1/4 on a tri6, 3/8 on a quad8, 0 on linear faces.
+pub fn alpha(count: usize) -> f64 {
+    match count {
+        6 => 0.25,
+        8 => 0.375,
+        _ => 0.0,
+    }
+}
+
+/// The flat facets a face of `n` nodes (3, 4: itself; tri6: four triangles; quad8: four
+/// quadrilaterals round its centre) is segmented by, counter-clockwise like the face: indices
+/// into [`facet_points`] (the face's nodes, then a quad8's centre).
+pub fn facets(n: usize) -> Option<&'static [&'static [usize]]> {
+    match n {
+        3 => Some(&[&[0, 1, 2]]),
+        4 => Some(&[&[0, 1, 2, 3]]),
+        6 => Some(&[&[0, 3, 5], &[3, 1, 4], &[5, 4, 2], &[3, 4, 5]]),
+        8 => Some(&[&[0, 4, 8, 7], &[4, 1, 5, 8], &[8, 5, 2, 6], &[7, 8, 6, 3]]),
+        _ => None,
+    }
+}
+
+/// The weights of facet vertex `v` of a face of `n` nodes over the face's nodes: a node itself,
+/// or a quad8's centre x(0, 0) = −¼ Σ corners + ½ Σ mid-side nodes.
+pub fn vertex_weights(n: usize, v: usize) -> &'static [(usize, f64)] {
+    const NODES: [(usize, f64); 8] = [(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0), (6, 1.0), (7, 1.0)];
+    const CENTRE: [(usize, f64); 8] = [(0, -0.25), (1, -0.25), (2, -0.25), (3, -0.25), (4, 0.5), (5, 0.5), (6, 0.5), (7, 0.5)];
+    match (n, v) {
+        (8, 8) => &CENTRE,
+        _ if v < n => NODES.get(v..=v).unwrap_or(&[]),
+        _ => &[],
+    }
+}
+
+/// The vertices `facet` (indices into [`facet_points`]) of one facet.
+pub fn facet_vertices<P: Copy>(points: &[P], facet: &[usize]) -> Vec<P> {
+    facet.iter().filter_map(|v| points.get(*v).copied()).collect()
+}
+
+/// The facets' vertices of a face (`None` unless it has 3, 4, 6 or 8 nodes).
+pub fn facet_points<T: Real>(x: &[Point<T>]) -> Option<Vec<Point<T>>> {
+    let n = x.len();
+    facets(n)?;
+    let mut out = x.to_vec();
+    if n == 8 {
+        let weights: Vec<T> = vertex_weights(8, 8).iter().map(|(_, w)| T::cst(*w)).collect();
+        out.push(interpolate(x, &weights));
+    }
+    Some(out)
+}
+
+/// The parent coordinates of facet vertex `v` of a face of `n` nodes: (r, s) of a triangle
+/// (N = 1 − r − s, r, s at its corners), (ξ, η) ∈ [−1, 1]² of a quadrilateral.
+fn parent(n: usize, v: usize) -> [f64; 2] {
+    const TRI: [[f64; 2]; 6] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]];
+    const QUAD: [[f64; 2]; 9] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [0.0, -1.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, 0.0]];
+    let table: &[[f64; 2]] = if matches!(n, 3 | 6) { &TRI } else { &QUAD };
+    table.get(v).copied().unwrap_or([0.0; 2])
+}
+
+/// The shape functions of a face of `n` nodes (tri3, quad4, tri6, quad8) at parent coordinates
+/// `c` ([`parent`]), 0 past its nodes.
+pub fn shape<T: Real>(n: usize, c: [T; 2]) -> [T; FACE_NODES] {
+    let zero = T::cst(0.0);
+    let one = T::cst(1.0);
+    let mut out = [zero; FACE_NODES];
+    let [r, s] = c;
+    match n {
+        3 | 6 => {
+            let l = [one - r - s, r, s];
+            if n == 3 {
+                out[..3].copy_from_slice(&l);
+            } else {
+                for k in 0..3 {
+                    out[k] = l[k] * (l[k] * 2.0 - 1.0);
+                    out[3 + k] = l[k] * l[(k + 1) % 3] * 4.0;
+                }
+            }
+        }
+        4 | 8 => {
+            for k in 0..4 {
+                let [a, b] = parent(4, k);
+                let (u, v) = (one + r * a, one + s * b);
+                out[k] = if n == 4 { u * v * 0.25 } else { u * v * (r * a + s * b - 1.0) * 0.25 };
+            }
+            if n == 8 {
+                for k in 4..8 {
+                    let [a, b] = parent(8, k);
+                    out[k] = if a == 0.0 { (one - r * r) * (one + s * b) * 0.5 } else { (one + r * a) * (one - s * s) * 0.5 };
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The multiplier basis Φ of a secondary face from its shape functions `n` (`count` nodes):
+/// N itself on a linear face; on a quadratic one Φ_c = N_c + α (N_m + N_m') at a corner c
+/// (m, m' its two mid-side nodes) and Φ_m = (1 − 2α) N_m at a mid-side node m (the transformed
+/// basis of M. A. Puso, T. A. Laursen, J. Solberg, CMAME 197:555–566, 2008; B. I. Wohlmuth,
+/// A. Popp, M. W. Gee, W. A. Wall, *An abstract framework for a priori estimates for contact
+/// problems in 3D with quadratic finite elements*, Comput. Mech. 49:735–747, 2012). The standard
+/// quadratic functions integrate to 0 at a tri6's corners and to −A/12 at a quad8's and are
+/// negative over parts of the face, so a corner's weighted gap could read open where the whole
+/// face penetrates. Φ is still a partition of unity spanning the same space (the patch test),
+/// and α ([`alpha`]) is the smallest that makes it non-negative everywhere on the face: on a
+/// tri6 Φ_c = L_c (2L_c − 1 + 4α (1 − L_c)), which is L_c² at α = 1/4; on a quad8, at the
+/// corner (−1, −1), Φ_c = (1 − ξ)(1 − η) ((α/2 − 1/4)(ξ + η) + α − 1/4), whose last factor is
+/// non-negative over the face (ξ + η ≤ 2) from α = 3/8. The integrals are then A/6 at every
+/// node of a tri6, and A/6 at a quad8's corners and A/12 at its mid-side nodes.
+pub fn multiplier<T: Real>(count: usize, n: &[T; FACE_NODES]) -> [T; FACE_NODES] {
+    if count <= 4 {
+        return *n;
+    }
+    let (corners, a) = (count / 2, alpha(count));
+    let mut out = *n;
+    for k in 0..corners {
+        let (m, before) = (corners + k, corners + (k + corners - 1) % corners);
+        out[k] = n[k] + (n[m] + n[before]) * a;
+        out[m] = n[m] * (1.0 - 2.0 * a);
+    }
+    out
+}
+
+/// A face's area vector (as [`area_vector`]), quadratic faces' the sum of their facets'.
+pub fn face_area_vector<T: Real>(x: &[Point<T>]) -> Option<Point<T>> {
+    if x.len() <= 4 {
+        return area_vector(x);
+    }
+    let points = facet_points(x)?;
+    let mut sum = [T::cst(0.0); 3];
+    for facet in facets(x.len())? {
+        let a = area_vector(&facet_vertices(&points, facet))?;
+        sum = [sum[0] + a[0], sum[1] + a[1], sum[2] + a[2]];
+    }
+    Some(sum)
+}
+
+/// A face's nodes in the reverse orientation (corners reversed, mid-side nodes following them).
+pub fn reversed<T: Copy>(x: &[T]) -> Vec<T> {
+    let n = x.len();
+    if n <= 4 {
+        return x.iter().rev().copied().collect();
+    }
+    let c = n / 2;
+    // New corner k is old corner c − 1 − k; the mid-side node between new corners k and k + 1
+    // is the old one between old corners c − 2 − k and c − 1 − k.
+    let corners = (0..c).filter_map(|k| x.get(c - 1 - k).copied());
+    let mids = (0..c).filter_map(|k| x.get(c + (2 * c - 2 - k) % c).copied());
+    corners.chain(mids).collect()
+}
+
+/// An integration point of a face pair of any order: the facet pair's sample with both faces'
+/// shape functions (and the secondary face's multiplier basis, [`multiplier`]).
+#[derive(Debug, Clone, Copy)]
+pub struct FaceSample<T> {
+    pub weight: T,
+    /// N of the secondary face, its multiplier basis Φ, and N of the main face (0 past their
+    /// nodes).
+    pub secondary: [T; FACE_NODES],
+    pub multiplier: [T; FACE_NODES],
+    pub main: [T; FACE_NODES],
+    pub xs: Point<T>,
+    pub xm: Point<T>,
+    pub normal: Point<T>,
+}
+
+impl<T: Real> FaceSample<T> {
+    /// The gap along the secondary normal, (x_m − x_s) · n.
+    pub fn gap(&self) -> T {
+        dot(sub(self.xm, self.xs), self.normal)
+    }
+
+    /// A linear pair's sample: its shape functions are the faces' own.
+    pub fn linear(p: &Sample<T>) -> FaceSample<T> {
+        let zero = T::cst(0.0);
+        let pad = |n: [T; 4]| std::array::from_fn(|k| n.get(k).copied().unwrap_or(zero));
+        let secondary = pad(p.secondary);
+        FaceSample { weight: p.weight, secondary, multiplier: secondary, main: pad(p.main), xs: p.xs, xm: p.xm, normal: p.normal }
+    }
+}
+
+/// The parent coordinates of a facet sample's point from the facet's own shape functions `n`.
+fn parent_at<T: Real>(count: usize, facet: &[usize], n: &[T; 4]) -> [T; 2] {
+    let mut c = [T::cst(0.0); 2];
+    for (v, w) in facet.iter().zip(n) {
+        let p = parent(count, *v);
+        c = [c[0] + *w * p[0], c[1] + *w * p[1]];
+    }
+    c
+}
+
+/// Integrate over the overlap of facet `fs` of a secondary face of `ns` nodes (its vertices
+/// `xs`) with facet `fm` of a main face of `nm` nodes (`xm`), as [`integrate`] does for flat
+/// faces, the samples carrying the parent faces' shape functions at the point (the facets'
+/// parent coordinates are linear in theirs: exact on faces with straight edges, mid-side nodes
+/// at their middles).
+pub fn integrate_facet<T: Real>(
+    (ns, fs): (usize, usize),
+    xs: &[Point<T>],
+    (nm, fm): (usize, usize),
+    xm: &[Point<T>],
+    mut f: impl FnMut(&FaceSample<T>),
+) -> Option<()> {
+    let (facet_s, facet_m) = (facets(ns)?.get(fs)?, facets(nm)?.get(fm)?);
+    integrate(xs, xm, |p| {
+        let mut q = FaceSample::linear(p);
+        if ns > 4 {
+            q.secondary = shape(ns, parent_at(ns, facet_s, &p.secondary));
+            q.multiplier = multiplier(ns, &q.secondary);
+        }
+        if nm > 4 {
+            q.main = shape(nm, parent_at(nm, facet_m, &p.main));
+        }
+        f(&q)
+    })
+}
+
+/// Integrate over the overlap of two faces of any order (3, 4, 6 or 8 nodes in their faces'
+/// node order), facet pair by facet pair ([`integrate_facet`]); linear faces are their own
+/// facet, so a linear pair is exactly [`integrate`]. `None` as [`integrate`] for any facet pair
+/// whose secondary facet has no normal, or a face of another node count.
+///
+/// **Quadratic faces** (M. A. Puso, T. A. Laursen, J. Solberg, *A segment-to-segment mortar
+/// contact method for quadratic elements and large deformations*, CMAME 197:555–566, 2008): a
+/// tri6 face is segmented as its four sub-triangles, a quad8 as four quadrilaterals round its
+/// centre, flat facets through the face's nodes. Each facet pair is projected, clipped and
+/// integrated as linear faces are, and at each point the parent faces' coordinates follow from
+/// the facets' (linear in them), where the quadratic shape functions and the multiplier basis are
+/// evaluated, and the points on both faces interpolated from their nodes with them (the gap is
+/// that of the quadratic surfaces). On a face with straight edges (mid-side nodes at their
+/// middles) the facets are the face exactly; on a curved one the facets carry the segmentation,
+/// the normal and the weights.
+pub fn integrate_faces<T: Real>(secondary: &[Point<T>], main: &[Point<T>], mut f: impl FnMut(&FaceSample<T>)) -> Option<()> {
+    let (ns, nm) = (secondary.len(), main.len());
+    if ns <= 4 && nm <= 4 {
+        return integrate(secondary, main, |p| f(&FaceSample::linear(p)));
+    }
+    let (ps, pm) = (facet_points(secondary)?, facet_points(main)?);
+    let mains: Vec<Vec<Point<T>>> = facets(nm)?.iter().map(|m| facet_vertices(&pm, m)).collect();
+    for (i, s) in facets(ns)?.iter().enumerate() {
+        let xs = facet_vertices(&ps, s);
+        for (j, xm) in mains.iter().enumerate() {
+            integrate_facet((ns, i), &xs, (nm, j), xm, |p| {
+                // The points of the quadratic faces themselves (on a facet's plane only where the
+                // face is flat).
+                let mut q = *p;
+                if ns > 4 {
+                    q.xs = interpolate(secondary, &p.secondary);
+                }
+                if nm > 4 {
+                    q.xm = interpolate(main, &p.main);
+                }
+                f(&q)
+            })?;
         }
     }
     Some(())
@@ -632,6 +908,111 @@ mod tests {
                 mm[j] -= h;
                 let fd = (value(pp) - value(pm) - value(mp) + value(mm)) / (4.0 * h * h);
                 assert!((e.hessian(k, j) - fd).abs() < 2e-3, "hessian ({k}, {j}): {} {fd}", e.hessian(k, j));
+            }
+        }
+    }
+
+    /// A tri6 and a quad8 face up (normal +z) at z = 0 with straight edges, their corners
+    /// `corners`.
+    fn quadratic_face(corners: &[[f64; 3]]) -> Vec<[f64; 3]> {
+        let n = corners.len();
+        let mids = (0..n).map(|k| std::array::from_fn(|i| 0.5 * (corners[k][i] + corners[(k + 1) % n][i])));
+        corners.iter().copied().chain(mids).collect()
+    }
+
+    #[test]
+    fn the_multiplier_basis_is_a_partition_of_unity_with_positive_weights() {
+        for (n, at) in [(6, [0.2, 0.3]), (8, [0.3, -0.6]), (3, [0.1, 0.7]), (4, [0.5, 0.25])] {
+            let s = shape(n, at);
+            let phi = multiplier(n, &s);
+            assert!((s.iter().sum::<f64>() - 1.0).abs() < 1e-15 && (phi.iter().sum::<f64>() - 1.0).abs() < 1e-15, "{n}: {s:?} {phi:?}");
+        }
+        // Non-negative everywhere (to round-off).
+        for i in 0..=40 {
+            for j in 0..=40 {
+                let (u, v) = (i as f64 / 40.0, j as f64 / 40.0);
+                let tri = (u + v <= 1.0).then(|| multiplier(6, &shape(6, [u, v])));
+                let quad = Some(multiplier(8, &shape(8, [2.0 * u - 1.0, 2.0 * v - 1.0])));
+                for phi in tri.iter().chain(&quad) {
+                    assert!(phi.iter().all(|p| *p >= -1e-15), "{u} {v}: {phi:?}");
+                }
+            }
+        }
+        // ∫ N and ∫ Φ over a tri6 of area 1/2 and a quad8 of area 4 (straight edges).
+        let tri = quadratic_face(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        let quad = quadratic_face(&[[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]);
+        for (face, corner_n, mid_n, corner_phi, mid_phi) in
+            [(&tri, 0.0, 1.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0), (&quad, -1.0 / 12.0, 1.0 / 3.0, 1.0 / 6.0, 1.0 / 12.0)]
+        {
+            let area = crate::frame::norm(face_area_vector(face).unwrap());
+            let (mut n, mut phi) = ([0.0; FACE_NODES], [0.0; FACE_NODES]);
+            integrate_faces(face, &reversed(face), |p| {
+                for a in 0..FACE_NODES {
+                    n[a] += p.weight * p.secondary[a];
+                    phi[a] += p.weight * p.multiplier[a];
+                }
+            })
+            .unwrap();
+            let c = face.len() / 2;
+            for a in 0..face.len() {
+                let (en, ep) = if a < c { (corner_n, corner_phi) } else { (mid_n, mid_phi) };
+                assert!((n[a] - en * area).abs() < 1e-14 && (phi[a] - ep * area).abs() < 1e-14, "{a}: {n:?} {phi:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn reversing_a_quadratic_face_keeps_its_mid_side_nodes_between_their_corners() {
+        assert_eq!(reversed(&[0, 1, 2, 3, 4, 5]), vec![2, 1, 0, 4, 3, 5]);
+        assert_eq!(reversed(&[0, 1, 2, 3, 4, 5, 6, 7]), vec![3, 2, 1, 0, 6, 5, 4, 7]);
+        assert_eq!(reversed(&[0, 1, 2, 3]), vec![3, 2, 1, 0]);
+    }
+
+    /// The consistent nodal weights ∫ N_i n dA of a quadratic face, summed over non-matching main
+    /// faces of either order that cover it, against the model's face integration; and the main
+    /// faces' own weights summed over the secondary face.
+    #[test]
+    fn quadratic_faces_integrate_their_shape_functions_over_non_matching_faces() {
+        let tri = quadratic_face(&[[0.1, 0.0, 0.0], [1.0, 0.2, 0.0], [0.3, 0.9, 0.0]]);
+        let quad = quadratic_face(&[[0.0, 0.0, 0.0], [1.1, 0.1, 0.0], [1.2, 1.0, 0.0], [0.1, 0.9, 0.0]]);
+        // Main faces at z = 0.1 facing down: a 3 × 3 grid of quad8, of tri6 or of quad4 faces.
+        for secondary in [&tri, &quad] {
+            let reference = fieldcraft_model::nodal::face_normal_weights(secondary).unwrap();
+            for kind in [8, 6, 4] {
+                let mut mains = Vec::new();
+                for i in 0..3 {
+                    for j in 0..3 {
+                        let q = square(-0.3 + 0.6 * i as f64, -0.3 + 0.6 * j as f64, 0.6, 0.1, false);
+                        match kind {
+                            8 => mains.push(quadratic_face(&q)),
+                            6 => {
+                                mains.push(quadratic_face(&[q[0], q[1], q[2]]));
+                                mains.push(quadratic_face(&[q[0], q[2], q[3]]));
+                            }
+                            _ => mains.push(q),
+                        }
+                    }
+                }
+                let mut found = vec![0.0; secondary.len()];
+                let mut gap = 0.0;
+                let mut main_total = 0.0;
+                for m in &mains {
+                    let mut own = [0.0; FACE_NODES];
+                    integrate_faces(secondary, m, |p| {
+                        gap += p.weight * p.gap();
+                        main_total += p.weight * p.main.iter().sum::<f64>();
+                        for a in 0..FACE_NODES {
+                            own[a] += p.weight * p.secondary[a];
+                        }
+                    })
+                    .unwrap();
+                    found.iter_mut().zip(own).for_each(|(f, o)| *f += o);
+                }
+                let area = crate::frame::norm(face_area_vector(secondary).unwrap());
+                for (a, (f, r)) in found.iter().zip(&reference).enumerate() {
+                    assert!((f - r[2]).abs() < 1e-13, "{kind}/{}: node {a}: {f} vs {}", secondary.len(), r[2]);
+                }
+                assert!((gap - 0.1 * area).abs() < 1e-13 && (main_total - area).abs() < 1e-13, "{gap} {main_total} {area}");
             }
         }
     }
