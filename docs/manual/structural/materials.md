@@ -3,18 +3,19 @@
 The constitutive models a material can carry and the procedures each acts in: linear elasticity
 (isotropic, or orthotropic by engineering constants), mass density, thermal properties, von
 Mises (J2) plasticity with bilinear, tabulated or Johnson–Cook hardening, Johnson–Cook damage
-with element erosion, and hyperelasticity (neo-Hookean, Mooney–Rivlin, Yeoh). One material
+with element erosion, hyperelasticity (neo-Hookean, Mooney–Rivlin, Yeoh), and the
+specific volume of a polymer against temperature and pressure (two-domain Tait PVT). One material
 record serves every solver: each takes the parts it can use, warns about the parts it leaves out,
 and refuses by name what it cannot represent. The J2 return map is one implementation shared by
 the implicit and explicit solvers.
 
 | | |
 |---|---|
-| **Commands** | `model.material.create`, `model.material.edit`, `model.material.plasticity`, `model.material.damage`, `model.material.delete` |
+| **Commands** | `model.material.create`, `model.material.edit`, `model.material.plasticity`, `model.material.damage`, `model.material.pvt`, `model.material.specific_volume`, `model.material.delete` |
 | **Step procedure** | all structural and heat transfer procedures; see [Procedures](#procedures) |
 | **Solver** | `crates/fem` material kernels, used by `crates/solver` (CPU, f64) and `crates/explicit` |
-| **Method** | orthotropic compliance (Jones 1999); radial return (Simo & Hughes 1998, §3.3); multiplicative finite-strain plasticity (Simo 1992); Lagrangian logarithmic kinematic plasticity (Miehe, Apel & Lambrecht 2002); Johnson–Cook flow and fracture (Johnson & Cook 1983, 1985); decoupled hyperelasticity (Holzapfel 2000, §6.6) |
-| **Verified by** | `nl-j2-uniaxial`, `nl-j2-bauschinger`, `nl-j2-simple-shear`, `j2-uniaxial-explicit`, `j2-bauschinger`, `j2-heated-bar`, `plastic-thick-cylinder`, `plastic-hinge-cantilever`, `nl-neo-hookean-uniaxial`, `nl-mooney-rivlin-*`, `nl-yeoh-uniaxial`, `nl-hybrid-incompressible`, `explicit-neo-hookean-implicit`; `crates/fem/src/{material,plasticity,elastoplastic,constitutive}.rs` tests |
+| **Method** | orthotropic compliance (Jones 1999); radial return (Simo & Hughes 1998, §3.3); multiplicative finite-strain plasticity (Simo 1992); Lagrangian logarithmic kinematic plasticity (Miehe, Apel & Lambrecht 2002); Johnson–Cook flow and fracture (Johnson & Cook 1983, 1985); decoupled hyperelasticity (Holzapfel 2000, §6.6); two-domain Tait PVT (Chang et al. 1996; Willerer et al. 2024, eqs. 1–9) |
+| **Verified by** | `nl-j2-uniaxial`, `nl-j2-bauschinger`, `nl-j2-simple-shear`, `j2-uniaxial-explicit`, `j2-bauschinger`, `j2-heated-bar`, `plastic-thick-cylinder`, `plastic-hinge-cantilever`, `nl-neo-hookean-uniaxial`, `nl-mooney-rivlin-*`, `nl-yeoh-uniaxial`, `nl-hybrid-incompressible`, `explicit-neo-hookean-implicit`; `crates/fem/src/{material,plasticity,elastoplastic,constitutive}.rs` tests; `crates/model/src/pvt.rs` tests |
 
 ## Synopsis
 
@@ -28,6 +29,11 @@ the implicit and explicit solvers.
   "damage": {"type": "johnson_cook", "d1": 0.05, "d2": 3.44, "d3": -2.12}, "erosion": {"plastic_strain": 1.0}}}
 {"command": "model.material.create", "params": {"name": "Rubber",
   "elastic": {"type": "isotropic", "young": 6, "poisson": 0.4995}, "hyperelastic": {"type": "mooney_rivlin", "c01": 0.1}}}
+{"command": "model.material.pvt", "params": {"name": "PP", "pvt": {"type": "tait",
+  "melt": {"b1": "1.23e-3 m³/kg", "b2": 9.0e5, "b3": 80, "b4": 4.5e-3},
+  "solid": {"b1": "1.14e-3 m³/kg", "b2": 4.0e5, "b3": 150, "b4": 3.5e-3},
+  "b5": 126.85, "b6": 0.25, "b7": "5.0e-5 m³/kg", "b8": 0.1, "b9": 0.04}}}
+{"command": "model.material.specific_volume", "params": {"name": "PP", "temperature": 200, "pressure": 50}}
 ```
 
 Numbers are in the model's display units (`model.units`; mm-t-s-N-MPa by default) or carry their
@@ -95,6 +101,28 @@ Damage and erosion need plasticity.
 
 μ = E/(2(1 + ν)) and κ = E/(3(1 − 2ν)) come from the isotropic elastic constants, which a
 hyperelastic material needs.
+
+### PVT behaviour (`pvt`, set by `model.material.pvt`; `null` removes it)
+
+The specific volume v of a polymer, and so its density ρ = 1/v, as a function of temperature
+and pressure: the modified two-domain Tait equation ([Theory](#pvt-the-two-domain-tait-equation)).
+`model.material.specific_volume {name, temperature, pressure}` evaluates it and replies the
+specific volume, the density, the transition temperature at that pressure and the domain; a
+material without PVT behaviour replies its constant density.
+
+| Field | Value | Default | Meaning |
+|---|---|---|---|
+| `type` | `tait` | — | the only model |
+| `melt`, `solid` | `{b1, b2, b3, b4}` | — | each domain's zero-pressure volume v0 = b1 + b2 (T − b5) (b1 > 0 specific volume, b2 ≥ 0 per degree) and pressure sensitivity B = b3 exp(−b4 (T − b5)) (b3 > 0 pressure, b4 ≥ 0 per degree) |
+| `b5` | above 0 K | — | the transition temperature at zero pressure (glass transition or crystallisation); may be below 0 °C |
+| `b6` | ≥ 0 | — | its rise with pressure, T_t = b5 + b6 p (temperature per pressure) |
+| `b7` | ≥ 0 | 0 | the solid's extra volume at the transition (specific volume); 0 for an amorphous polymer |
+| `b8` | ≥ 0 | 0 | the temperature rate of that term (per degree) |
+| `b9` | ≥ 0 | 0 | its pressure rate (per pressure) |
+
+Specific volume shows in the display system's volume per mass (mm³/t in mm-t-s-N-MPa); per
+degree and per pressure follow the system's temperature step and pressure. Coefficients
+published in m³/kg, K and Pa can be typed with their unit (`"1.23e-3 m³/kg"`).
 
 ## Theory
 
@@ -191,6 +219,22 @@ D = D_dev + K m mᵀ, which an orthotropic material does not have. In nonlinear 
 solids take the material's isochoric part and its volumetric energy separately, so they need a
 law with that split: a hyperelastic option or plasticity (St Venant–Kirchhoff is refused). The
 elements are described in [Element library](elements.md#solid-continuum-elements).
+
+### PVT: the two-domain Tait equation
+
+```text
+v(T, p) = v0(T) · [1 − C ln(1 + p / B(T))] + vt(T, p),   C = 0.0894
+v0(T)   = b1 + b2 (T − b5),   B(T) = b3 exp(−b4 (T − b5))
+T_t(p)  = b5 + b6 p
+vt      = b7 exp(b8 (T − b5) − b9 p)   in the solid (T ≤ T_t(p)), 0 in the melt
+```
+
+The melt coefficients apply above T_t(p), the solid ones at and below it. C is Tait's universal
+constant for polymers. The form is Chang, Chen and Su's (1996), written out with the role of
+each coefficient by Willerer, Brinkmann and Drechsler (2024, eqs. 1–9). Temperatures are
+absolute. A state where the equation gives no positive, finite volume (a pressure far beyond the
+fitted range, where the bracket turns negative) is refused, as are a negative pressure and a
+temperature at or below 0 K.
 
 ## Procedures
 
@@ -340,6 +384,7 @@ fibres next to the clamp), while the bar, yielded uniformly, unloads to zero str
 | Johnson–Cook impact: heating, damage, erosion | consistency | eroded elements reported, energy balance < 2 %, bit-identical runs | as stated | `johnson_cook_impact_erodes_elements` |
 | Material point | theory | consistent tangents against central differences (finite and small strain, from a plastic history); bilinear, table and Johnson–Cook flow curves; heating and damage; hostile increments stay finite | round-off | `crates/fem/src/{plasticity,elastoplastic,constitutive}.rs` tests |
 | Orthotropic elasticity | theory | isotropic constants give the isotropic D; uniaxial response | round-off | `orthotropic_with_isotropic_constants_is_isotropic`, `orthotropic_uniaxial_response` |
+| Two-domain Tait PVT | theory only, on a constructed coefficient set (the equation written out term by term; zero-pressure limit; monotonic in T and p within a domain; branches meeting at the transition; densities in the handbook range of unfilled PP); not checked against measured PVT data (see [Limitations](#limitations)) | round-off | 10⁻¹⁴ rel. | `crates/model/src/pvt.rs` tests |
 
 ## Limitations
 
@@ -352,13 +397,20 @@ fibres next to the clamp), while the bar, yielded uniformly, unloads to zero str
 - Thermal properties are constant in temperature.
 - Shells and beams take isotropic, linear elastic, homogeneous sections only.
 - Orthotropic thermal expansion is refused in explicit dynamics.
+- PVT behaviour is stored and evaluated (`model.material.specific_volume`) but no solver uses
+  it yet: the solvers take the constant `density`. There is no cooling-rate dependence (the
+  coefficients describe one cooling rate).
+- The Tait implementation is not yet checked against measured PVT data: its tests check it
+  against the equation itself. The case against measured volumes is added in the PR that first
+  uses PVT in a solver.
 
 ## Implementation
 
 | File | Contents |
 |---|---|
 | `crates/model/src/materials.rs` | `Material`, `Elastic`, `Plastic`, `Hardening`, `Damage`, `Erosion`, `Hyperelastic`, `Thermal`, their validation |
-| `crates/engine/src/cmd/define.rs` | `model.material.create/edit/delete`, `model.material.plasticity`, `model.material.damage` |
+| `crates/model/src/pvt.rs` | `Pvt` (the two-domain Tait equation), `TaitDomain`, `Pvt::evaluate` |
+| `crates/engine/src/cmd/define.rs` | `model.material.create/edit/delete`, `model.material.plasticity`, `model.material.damage`, `model.material.pvt`, `model.material.specific_volume` |
 | `crates/fem/src/material.rs` | `elasticity` (isotropic, orthotropic), `von_mises`, `principal` |
 | `crates/fem/src/plasticity.rs` | `J2::from_model`, `J2::radial_return`, `J2::update`, `J2::tangent`, Johnson–Cook flow and damage |
 | `crates/fem/src/elastoplastic.rs` | finite- and small-strain J2 material points with consistent tangents |
@@ -380,3 +432,5 @@ fibres next to the clamp), while the bar, yielded uniformly, unloads to zero str
 - M. Mooney. J. Appl. Phys. 11:582–592, 1940.
 - R. S. Rivlin. Phil. Trans. R. Soc. A 241:379–397, 1948.
 - O. H. Yeoh. Rubber Chem. Technol. 66(5):754–771, 1993.
+- R. Y. Chang, C. H. Chen, K. S. Su. *Modifying the Tait equation with cooling-rate effects to predict the pressure–volume–temperature behaviors of amorphous polymers: modeling and experiments.* Polym. Eng. Sci. 36(13):1789–1795, 1996. doi:[10.1002/pen.10574](https://doi.org/10.1002/pen.10574)
+- T. Willerer, T. Brinkmann, K. Drechsler. *Development and Application of a Cooling Rate Dependent PVT Model for Injection Molding Simulation of Semi Crystalline Thermoplastics.* Polymers 16(22):3194, 2024. doi:[10.3390/polym16223194](https://doi.org/10.3390/polym16223194) (open access)

@@ -458,6 +458,16 @@ pub fn with_units(form: &[Field], params: &Value, input: &DisplaySystem) -> Valu
 /// system by these, and get a `units` object naming the unit of each quantity they hold.
 pub const REPLIES: &[(&str, &[(&str, Dim)])] = &[
     ("model.initial_field.map", &[("/max_distance", Dim::Length), ("/tolerance", Dim::Length)]),
+    (
+        "model.material.specific_volume",
+        &[
+            ("/temperature", Dim::Temperature),
+            ("/pressure", Dim::Stress),
+            ("/specific_volume", Dim::Of(Quantity::SpecificVolume)),
+            ("/density", Dim::Density),
+            ("/transition_temperature", Dim::Temperature),
+        ],
+    ),
     ("solve.static", STATIC),
     ("solve.nonlinear", NONLINEAR),
     (

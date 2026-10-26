@@ -1,6 +1,8 @@
 //! The commands' parameter schemas ([`crate::schema`]), area by area. Each describes the JSON
 //! the command's `run` reads, as its `params` doc string does in words.
 
+use fieldcraft_model::units::Quantity;
+
 use crate::schema::Collection as C;
 use crate::schema::Dim as D;
 use crate::schema::*;
@@ -216,6 +218,35 @@ const THERMAL: Field = group(
 )
 .help("Heat conduction, specific heat and thermal expansion, for heat-transfer and thermal-stress steps.");
 
+/// One domain's coefficients of the Tait equation (melt or solid).
+const TAIT_DOMAIN: &[Field] = &[
+    positive("b1", "b1", D::Of(Quantity::SpecificVolume))
+        .help("Specific volume at the transition temperature b5 and zero pressure. Polymers ≈ 0.8e-3–1.3e-3 m³/kg.")
+        .req(),
+    positive("b2", "b2", D::Of(Quantity::SpecificVolumePerTemperature)).help("Rise of the zero-pressure specific volume per degree above b5.").req(),
+    positive("b3", "b3", D::Stress).help("Pressure sensitivity B of the Tait equation at b5; typically 50–300 MPa.").req(),
+    positive("b4", "b4", D::Expansion).help("Fall of the pressure sensitivity with temperature: B = b3 exp(−b4 (T − b5)).").req(),
+];
+
+const PVT: Field = variants(
+    "pvt",
+    "PVT",
+    &[variant(
+        "tait",
+        "Two-domain Tait",
+        &[
+            group("melt", "Melt", TAIT_DOMAIN).help("Coefficients above the transition temperature.").req(),
+            group("solid", "Solid", TAIT_DOMAIN).help("Coefficients at and below the transition temperature.").req(),
+            num("b5", "b5", D::Temperature).help("Transition temperature at zero pressure: the glass transition or crystallisation temperature (above absolute zero).").req(),
+            positive("b6", "b6", D::Of(Quantity::TemperaturePerPressure)).help("Rise of the transition temperature with pressure, T_t = b5 + b6 p.").req(),
+            positive("b7", "b7", D::Of(Quantity::SpecificVolume)).help("Extra solid volume at the transition of a semi-crystalline polymer; 0 for an amorphous one.").def("0"),
+            positive("b8", "b8", D::Expansion).help("Temperature rate of the transition volume term b7 exp(b8 (T − b5) − b9 p).").def("0"),
+            positive("b9", "b9", D::Of(Quantity::InversePressure)).help("Pressure rate of the transition volume term.").def("0"),
+        ],
+    )],
+)
+.help("Specific volume against temperature and pressure (the modified two-domain Tait equation of a polymer): its density ρ = 1/v where the state is known.");
+
 pub const MATERIAL: &[Field] = &[
     NAME,
     ELASTIC,
@@ -226,6 +257,7 @@ pub const MATERIAL: &[Field] = &[
     DAMAGE,
     EROSION,
     THERMAL,
+    PVT,
     variants(
         "fluid",
         "Fluid",
@@ -290,6 +322,13 @@ pub const MATERIAL: &[Field] = &[
 
 pub const MATERIAL_PLASTICITY: &[Field] =
     &[reference("name", "Material", C::Material).help("The material to change.").req(), PLASTIC.req().def(r#"{"type": "bilinear"}"#)];
+pub const MATERIAL_PVT: &[Field] =
+    &[reference("name", "Material", C::Material).help("The material to change.").req(), PVT.req().def(r#"{"type": "tait"}"#)];
+pub const MATERIAL_SPECIFIC_VOLUME: &[Field] = &[
+    reference("name", "Material", C::Material).help("The material to evaluate.").req(),
+    num("temperature", "Temperature", D::Temperature).help("The temperature of the state.").req(),
+    positive("pressure", "Pressure", D::Stress).help("The pressure of the state.").def("0"),
+];
 pub const MATERIAL_DAMAGE: &[Field] = &[
     reference("name", "Material", C::Material).help("The material to change.").req(),
     DAMAGE.def(r#"{"type": "johnson_cook"}"#).hint("give damage, erosion or both"),

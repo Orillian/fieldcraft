@@ -95,7 +95,7 @@ definition_commands!(
     Material,
     "material",
     "Material",
-    r#"{"name": "Steel", "elastic": {"type": "isotropic", "young": 210000, "poisson": 0.3} | {"type": "engineering_constants", "young": [E1, E2, E3], "poisson": [ν12, ν13, ν23], "shear": [G12, G13, G23]}, "density": 7.85e-9, "fluid": {"type": "newtonian", "viscosity": 1.0e-9} (dynamic viscosity) | {"type": "power_law", "consistency": K, "index": n, "reference_shear_rate"?: 1 (default 1/s)} (η = K (γ̇/γ̇_ref)^(n−1): K is the viscosity at the reference rate) | {"type": "carreau_yasuda", "zero_shear_viscosity": η₀, "infinite_shear_viscosity"?: η∞ (default 0, at most η₀), "time_constant": λ, "a"?: 2, "index": n} (η = η∞ + (η₀ − η∞) (1 + (λγ̇)^a)^((n−1)/a)) | {"type": "cross", "zero_shear_viscosity": η₀, "time_constant": λ, "index": n (0 < n < 1)} (η = η₀ / (1 + (λγ̇)^(1−n))) | {"type": "cross_wlf", "d1", "d2" (temperature), "a1", "a2" (temperature difference), "critical_stress": τ*, "index": n (0 < n < 1)} (η = η₀ / (1 + (η₀ γ̇/τ*)^(1−n)), η₀ = D1 exp(−A1 (T − D2) / (A2 + T − D2)); needs heat in the fluid domain) (γ̇ the local shear rate; n from 0 to 5; a fluid needs a density), "plastic": {…} (see model.material.plasticity), "damage": {…}, "erosion": {…} (see model.material.damage), "hyperelastic": {"type": "neo_hookean"} | {"type": "mooney_rivlin", "c01": 0.1} (C10 = μ/2 − C01) | {"type": "yeoh", "c20": -0.01, "c30": 0.001} (C10 = μ/2) (large strain in nonlinear steps, from the isotropic constants: μ = E/(2(1 + ν)), κ = E/(3(1 − 2ν)); without it an elastic material is St Venant–Kirchhoff there), "thermal": {"conductivity": 0.05 | [kx, ky, kz], "specific_heat": 4.6e8, "expansion": 1.2e-5 | [αx, αy, αz], "reference_temperature": 20 (zero thermal strain; default 0 °C)} (heat transfer and thermal strain; each key optional)} — numbers in the display units (model.units), or with their unit ("210 GPa")"#,
+    r#"{"name": "Steel", "elastic": {"type": "isotropic", "young": 210000, "poisson": 0.3} | {"type": "engineering_constants", "young": [E1, E2, E3], "poisson": [ν12, ν13, ν23], "shear": [G12, G13, G23]}, "density": 7.85e-9, "fluid": {"type": "newtonian", "viscosity": 1.0e-9} (dynamic viscosity) | {"type": "power_law", "consistency": K, "index": n, "reference_shear_rate"?: 1 (default 1/s)} (η = K (γ̇/γ̇_ref)^(n−1): K is the viscosity at the reference rate) | {"type": "carreau_yasuda", "zero_shear_viscosity": η₀, "infinite_shear_viscosity"?: η∞ (default 0, at most η₀), "time_constant": λ, "a"?: 2, "index": n} (η = η∞ + (η₀ − η∞) (1 + (λγ̇)^a)^((n−1)/a)) | {"type": "cross", "zero_shear_viscosity": η₀, "time_constant": λ, "index": n (0 < n < 1)} (η = η₀ / (1 + (λγ̇)^(1−n))) | {"type": "cross_wlf", "d1", "d2" (temperature), "a1", "a2" (temperature difference), "critical_stress": τ*, "index": n (0 < n < 1)} (η = η₀ / (1 + (η₀ γ̇/τ*)^(1−n)), η₀ = D1 exp(−A1 (T − D2) / (A2 + T − D2)); needs heat in the fluid domain) (γ̇ the local shear rate; n from 0 to 5; a fluid needs a density), "plastic": {…} (see model.material.plasticity), "damage": {…}, "erosion": {…} (see model.material.damage), "hyperelastic": {"type": "neo_hookean"} | {"type": "mooney_rivlin", "c01": 0.1} (C10 = μ/2 − C01) | {"type": "yeoh", "c20": -0.01, "c30": 0.001} (C10 = μ/2) (large strain in nonlinear steps, from the isotropic constants: μ = E/(2(1 + ν)), κ = E/(3(1 − 2ν)); without it an elastic material is St Venant–Kirchhoff there), "thermal": {"conductivity": 0.05 | [kx, ky, kz], "specific_heat": 4.6e8, "expansion": 1.2e-5 | [αx, αy, αz], "reference_temperature": 20 (zero thermal strain; default 0 °C)} (heat transfer and thermal strain; each key optional), "pvt": {…} (see model.material.pvt)} — numbers in the display units (model.units), or with their unit ("210 GPa")"#,
     super::forms::MATERIAL,
     super::forms::MATERIAL_DELETE,
     add_material,
@@ -108,10 +108,15 @@ definition_commands!(
     exists: Material
 );
 
+/// Material `n`, or the error that it does not exist.
+fn material<'a>(s: &'a Session, n: &str) -> Result<&'a Material> {
+    s.model.material(n).ok_or_else(|| EngineError::Params(format!("material `{n}` does not exist")))
+}
+
 /// A copy of material `name` with `change` applied, put back through the model's validation.
 fn change_material(s: &mut Session, p: &Value, change: impl FnOnce(&mut Material, &Value) -> Result<()>) -> Result<Value> {
     let n = name(p)?;
-    let mut m = s.model.material(n).cloned().ok_or_else(|| EngineError::Params(format!("material `{n}` does not exist")))?;
+    let mut m = material(s, n)?.clone();
     change(&mut m, p)?;
     s.model.replace_material(n, m)?;
     Ok(json!({"name": n}))
@@ -129,6 +134,54 @@ pub const MATERIAL_PLASTICITY: CommandSpec = CommandSpec {
             m.plastic = req(p, "plastic")?;
             Ok(())
         })
+    },
+};
+
+pub const MATERIAL_PVT: CommandSpec = CommandSpec {
+    id: "model.material.pvt",
+    label: "PVT",
+    params: r#"{"name": "PP", "pvt": {"type": "tait", "melt": {"b1": 1.23e-3, "b2": 9.0e-7, "b3": 8.0e7, "b4": 4.5e-3}, "solid": {"b1": 1.14e-3, "b2": 4.0e-7, "b3": 1.5e8, "b4": 3.5e-3}, "b5": 400, "b6": 2.5e-7, "b7": 5.0e-5, "b8": 0.1, "b9": 4.0e-8} | null} — specific volume against temperature and pressure by the modified two-domain Tait equation, v = v0 (1 − 0.0894 ln(1 + p/B)) + vt with v0 = b1 + b2 (T − b5), B = b3 exp(−b4 (T − b5)) per domain (melt above T_t = b5 + b6 p, solid at and below), vt = b7 exp(b8 (T − b5) − b9 p) in the solid (b7–b9 default 0: an amorphous polymer); null removes it. Numbers in the display units (b1, b7 specific volume; b2 per degree; b3 pressure; b4, b8 per degree; b5 temperature; b6 temperature per pressure; b9 per pressure), or with their unit. Evaluate it with model.material.specific_volume"#,
+    form: Some(super::forms::MATERIAL_PVT),
+    kind: CommandKind::Model,
+    requires: &[Requirement::Material],
+    run: |s: &mut Session, p: &Value| {
+        change_material(s, p, |m, p| {
+            m.pvt = req(p, "pvt")?;
+            Ok(())
+        })
+    },
+};
+
+pub const MATERIAL_SPECIFIC_VOLUME: CommandSpec = CommandSpec {
+    id: "model.material.specific_volume",
+    label: "Specific Volume",
+    params: r#"{"name": "PP", "temperature": 200, "pressure": 50} — a material's specific volume and density at a temperature and pressure (pressure default 0): from its PVT behaviour (`model`: "tait", with the transition temperature at that pressure and the `domain`, melt or solid), else its constant density (`model`: "constant"); refused for a state outside the Tait equation's range"#,
+    form: Some(super::forms::MATERIAL_SPECIFIC_VOLUME),
+    kind: CommandKind::Model,
+    requires: &[Requirement::Material],
+    run: |s: &mut Session, p: &Value| {
+        let n = name(p)?;
+        let m = material(s, n)?;
+        let temperature: f64 = req(p, "temperature")?;
+        let pressure: f64 = opt(p, "pressure")?.unwrap_or(0.0);
+        let mut reply = json!({"name": n, "temperature": temperature, "pressure": pressure});
+        match &m.pvt {
+            Some(pvt) => {
+                let state = pvt.evaluate(temperature, pressure).map_err(|e| EngineError::Params(format!("material `{n}`: {e}")))?;
+                reply["model"] = json!("tait");
+                reply["specific_volume"] = json!(state.specific_volume);
+                reply["density"] = json!(state.density);
+                reply["transition_temperature"] = json!(state.transition_temperature);
+                reply["domain"] = json!(state.domain);
+            }
+            None => {
+                let rho = m.density.ok_or_else(|| EngineError::Params(format!("material `{n}` has neither a density nor PVT behaviour")))?;
+                reply["model"] = json!("constant");
+                reply["specific_volume"] = json!(1.0 / rho);
+                reply["density"] = json!(rho);
+            }
+        }
+        Ok(reply)
     },
 };
 
@@ -765,5 +818,94 @@ pub(crate) mod tests {
             assert!(s.execute("model.material.plasticity", &bad).is_err(), "{bad}");
         }
         assert!(s.execute("model.material.damage", &json!({"name": "Steel"})).is_err());
+    }
+
+    /// The model crate's constructed polypropylene-like set (realistic unfilled-PP densities),
+    /// typed in mm-t-s-N-MPa with °C: specific volumes in mm³/t, b3 in MPa, b5 in °C, b6 in
+    /// °C/MPa, b9 in 1/MPa (b1m = 1.23e-3 m³/kg = 1.23e9 mm³/t, b6 = 2.5e-7 K/Pa = 0.25 °C/MPa).
+    fn pp_pvt() -> serde_json::Value {
+        json!({"type": "tait",
+               "melt": {"b1": 1.23e9, "b2": 9.0e5, "b3": 80, "b4": 4.5e-3},
+               "solid": {"b1": "1.14e-3 m³/kg", "b2": 4.0e5, "b3": "150 MPa", "b4": 3.5e-3},
+               "b5": 126.85, "b6": 0.25, "b7": 5.0e7, "b8": 0.1, "b9": 0.04})
+    }
+
+    #[test]
+    fn pvt_behaviour_is_stored_in_si_evaluated_and_saved() {
+        let mut s = Session::default();
+        s.execute("model.units", &json!({"system": "mm-t-s-N-MPa"})).unwrap();
+        s.execute("model.material.create", &json!({"name": "PP", "elastic": {"type": "isotropic", "young": 1500, "poisson": 0.4}})).unwrap();
+        s.execute("model.material.pvt", &json!({"name": "PP", "pvt": pp_pvt()})).unwrap();
+        let Some(fieldcraft_model::Pvt::Tait { melt, solid, b5, b6, b7, b8, b9 }) = s.model.material("PP").unwrap().pvt else { panic!("no PVT") };
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs();
+        assert!(close(melt.b1, 1.23e-3) && close(melt.b2, 9.0e-7) && close(melt.b3, 8.0e7) && close(melt.b4, 4.5e-3), "{melt:?}");
+        assert!(close(solid.b1, 1.14e-3) && close(solid.b3, 1.5e8), "{solid:?}");
+        assert!(close(b5, 400.0) && close(b6, 2.5e-7) && close(b7, 5.0e-5) && close(b8, 0.1) && close(b9, 4.0e-8));
+
+        // 200 °C at zero pressure: the melt's b1 + b2 (T − b5) = 1.295835e-3 m³/kg (772 kg/m³),
+        // shown in mm³/t and t/mm³; at 100 MPa the transition is 126.85 + 25 °C.
+        let r = s.execute("model.material.specific_volume", &json!({"name": "PP", "temperature": 200})).unwrap();
+        assert_eq!((r["model"].as_str(), r["domain"].as_str()), (Some("tait"), Some("melt")), "{r}");
+        assert!(close(r["specific_volume"].as_f64().unwrap(), 1.295835e9), "{r}");
+        assert!(close(r["density"].as_f64().unwrap(), 1.0 / 1.295835e9), "{r}");
+        assert_eq!(r["units"]["specific_volume"], "mm³/t", "{r}");
+        let r = s.execute("model.material.specific_volume", &json!({"name": "PP", "temperature": 150, "pressure": 100})).unwrap();
+        assert_eq!(r["domain"], "solid", "{r}");
+        assert!((r["transition_temperature"].as_f64().unwrap() - 151.85).abs() < 1e-9, "{r}");
+
+        // A transition below 0 °C is valid (the model only needs it above 0 K), and the form
+        // sets no minimum on b5 that the UI or MCP schema would flag it with.
+        let mut cold = pp_pvt();
+        cold["b5"] = json!(-20);
+        s.execute("model.material.pvt", &json!({"name": "PP", "pvt": cold})).unwrap();
+        assert!(matches!(s.model.material("PP").unwrap().pvt, Some(fieldcraft_model::Pvt::Tait { b5, .. }) if close(b5, 253.15)));
+        let b5 = crate::schema::field_at(crate::cmd::forms::MATERIAL_PVT, "pvt/b5").map(|f| &f.kind);
+        assert!(matches!(b5, Some(crate::schema::Kind::Number { min: None, .. })), "{b5:?}");
+        s.execute("model.material.pvt", &json!({"name": "PP", "pvt": pp_pvt()})).unwrap();
+
+        // Hostile: bad coefficients, states outside the range, a missing material; nothing changes.
+        let journal = s.journal.len();
+        let before = s.model.clone();
+        for bad in [json!({"b5": -300}), json!({"b6": -1}), json!({"b9": "nan"}), json!({"b10": 1})] {
+            let mut pvt = pp_pvt();
+            for (k, v) in bad.as_object().unwrap() {
+                pvt[k] = v.clone();
+            }
+            assert!(s.execute("model.material.pvt", &json!({"name": "PP", "pvt": pvt})).is_err(), "{bad}");
+        }
+        let mut pvt = pp_pvt();
+        pvt["melt"]["b3"] = json!(0);
+        assert!(s.execute("model.material.pvt", &json!({"name": "PP", "pvt": pvt})).is_err());
+        for p in [
+            json!({"temperature": -300}),
+            json!({"temperature": 200, "pressure": -1}),
+            json!({"temperature": 200, "pressure": 1e30}),
+            json!({"temperature": "hot"}),
+        ] {
+            let mut q = p.clone();
+            q["name"] = json!("PP");
+            assert!(s.execute("model.material.specific_volume", &q).is_err(), "{p}");
+        }
+        assert!(s.execute("model.material.pvt", &json!({"name": "Nope", "pvt": pp_pvt()})).is_err());
+        assert!(s.execute("model.material.specific_volume", &json!({"name": "Nope", "temperature": 20})).is_err());
+        assert_eq!((s.journal.len(), &s.model), (journal, &before));
+
+        // Saved and reopened, the PVT behaviour is the same, bit for bit.
+        let dir = std::env::temp_dir().join(format!("fieldcraft-pvt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pp.fieldcraft");
+        s.execute("file.save_as", &json!({"path": path})).unwrap();
+        let mut t = Session::default();
+        t.execute("file.open", &json!({"path": path})).unwrap();
+        assert_eq!(t.model.material("PP"), s.model.material("PP"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Without PVT behaviour the evaluation gives the constant density; null removes it.
+        s.execute("model.material.pvt", &json!({"name": "PP", "pvt": null})).unwrap();
+        assert!(s.execute("model.material.specific_volume", &json!({"name": "PP", "temperature": 20})).is_err(), "no density either");
+        s.execute("model.material.create", &json!({"name": "Steel", "density": 7.85e-9})).unwrap();
+        let r = s.execute("model.material.specific_volume", &json!({"name": "Steel", "temperature": 20, "pressure": 5})).unwrap();
+        assert_eq!(r["model"], "constant");
+        assert!(close(r["density"].as_f64().unwrap(), 7.85e-9) && close(r["specific_volume"].as_f64().unwrap(), 1.0 / 7.85e-9), "{r}");
     }
 }
