@@ -12,6 +12,8 @@
 //! B (2 − q)                        for an invalid element (B large),
 //! ```
 //!
+//! (on a linear hexahedron, phase 2's φ is the mean of φ over its nine Jacobian samples, smooth
+//! where φ of the smallest has a kink),
 //! φ continuing as its tangent line below q = 0.3, so it rises steeply but stays finite as an
 //! element degenerates, while the invalid branch falls as an inverted element untangles and lies
 //! above every valid element's term (a barrier: no step that lowers `F` inverts an element unless
@@ -41,11 +43,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fieldcraft_model::Model;
 
-use super::{Constraints, Elem, Freedom, P, RegionQuality, State, add, dist, dot, measure, region_quality, scale, sub};
+use super::{Constraints, Elem, Freedom, P, ROUND_OFF, RegionQuality, State, add, dist, dot, measure, region_quality, scale, sub};
 use crate::{Error, Result};
 
 /// The smallest fraction of a step tried.
 const MIN_STEP: f64 = 1e-6; // unit-factors: a fraction of a step
+
+/// The relative change of the local objective over an edge length below which a difference
+/// gradient's direction is not trusted (its round-off is about 1e-11 of that).
+const TRUSTED_GRADIENT: f64 = 1e-3; // unit-factors: a relative change of the objective
 
 /// Weight of an invalid element in the objective: above every valid element's term (the shape
 /// term is at most [`shape`] at 0, a few 1e9, plus the size term), so no step that untangles an
@@ -72,13 +78,46 @@ enum Phase {
     MinMax,
 }
 
-/// The objective's term for one element of quality `q` whose size went from `v0` to `v`.
-fn phi(phase: Phase, q: f64, valid: bool, v: f64, v0: f64) -> f64 {
+/// A value of the objective, `INVALID · barrier + valid`, kept in its two parts: summed as one
+/// number, the barrier terms of invalid and stretched elements (1e11 each) rounded the valid
+/// elements' terms away, so a move that left the barrier as it was compared round-off, and the
+/// difference gradient of a node next to an invalid element pointed where round-off did (#612).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Objective {
+    /// The invalid and stretched elements' terms, in units of [`INVALID`].
+    barrier: f64,
+    /// The valid elements' terms.
+    valid: f64,
+}
+
+impl Objective {
+    /// `self − other`, the parts subtracted first.
+    fn minus(self, other: Objective) -> f64 {
+        INVALID * (self.barrier - other.barrier) + (self.valid - other.valid)
+    }
+
+    fn plus(self, other: Objective) -> Objective {
+        Objective { barrier: self.barrier + other.barrier, valid: self.valid + other.valid }
+    }
+
+    /// The size of the value, for its round-off.
+    fn magnitude(self) -> f64 {
+        INVALID * self.barrier.abs() + self.valid.abs()
+    }
+
+    fn is_zero(self) -> bool {
+        self.barrier == 0.0 && self.valid == 0.0
+    }
+}
+
+/// The objective's term for one element of quality `q` and shape term `shaped` whose size went
+/// from `v0` to `v`.
+fn phi(q: f64, shaped: f64, valid: bool, v: f64, v0: f64) -> Objective {
     if valid && q > 0.0 {
         let g = if v > 0.0 && v0 > 0.0 { libm::log(v / v0) } else { 0.0 };
-        shape(phase, q) + SIZE_WEIGHT * g * g
+        Objective { barrier: 0.0, valid: shaped + SIZE_WEIGHT * g * g }
     } else {
-        INVALID * (2.0 - q.min(1.0))
+        Objective { barrier: 2.0 - q.min(1.0), valid: 0.0 }
     }
 }
 
@@ -103,11 +142,13 @@ fn shape(phase: Phase, q: f64) -> f64 {
 /// A linear hexahedron's scaled Jacobian at its corners and centre (the samples
 /// [`crate::quality::element_quality`] takes), straight from the trilinear map: the sweeps'
 /// inner loop, where the certified check would dominate. A state is certified before it is kept.
-fn hex8_scaled_jacobian(x: &[P]) -> (f64, f64) {
+/// The Jacobian at the centre and the scaled Jacobian of every sample.
+fn hex8_scaled_jacobian(x: &[P]) -> (f64, [f64; 9]) {
+    let mut samples = [0.0; 9];
     let corners = &crate::quality::jacobian::HEX_CORNERS;
     let at = |k: usize| x.get(k).copied().unwrap_or([0.0; 3]);
-    let (mut worst, mut centre) = (f64::INFINITY, 0.0);
-    for u in corners.iter().map(|c| c.map(|v| v as f64)).chain(std::iter::once([0.5; 3])) {
+    let mut centre = 0.0;
+    for (sample, u) in samples.iter_mut().zip(corners.iter().map(|c| c.map(|v| v as f64)).chain(std::iter::once([0.5; 3]))) {
         let mut col = [[0.0; 3]; 3];
         for (k, bits) in corners.iter().enumerate() {
             for (d, c) in col.iter_mut().enumerate() {
@@ -122,18 +163,17 @@ fn hex8_scaled_jacobian(x: &[P]) -> (f64, f64) {
         }
         let l = dot(col[0], col[0]).sqrt() * dot(col[1], col[1]).sqrt() * dot(col[2], col[2]).sqrt();
         let det = dot(col[0], super::cross(col[1], col[2]));
-        let q = if l > 0.0 && l.is_finite() { det / l } else { -1.0 };
-        worst = worst.min(q);
+        *sample = if l > 0.0 && l.is_finite() { det / l } else { -1.0 };
         centre = det;
     }
-    (worst, centre)
+    (centre, samples)
 }
 
 /// An element's size for the size term: a linear hexahedron's Jacobian at its centre (its
 /// volume, near enough), else the size [`crate::quality::element_quality`] reports.
 pub(super) fn size(kind: fieldcraft_model::ElementKind, x: &[P]) -> f64 {
     if kind == fieldcraft_model::ElementKind::Hex8 {
-        hex8_scaled_jacobian(x).1
+        hex8_scaled_jacobian(x).0
     } else {
         crate::quality::element_quality(kind, x).map_or(0.0, |q| q.size)
     }
@@ -141,45 +181,53 @@ pub(super) fn size(kind: fieldcraft_model::ElementKind, x: &[P]) -> f64 {
 
 /// An element's objective term, quality and validity; `certified` takes the certified check
 /// for every kind.
-fn term_of(phase: Phase, e: &Elem, s: &State<'_>, certified: bool) -> (f64, f64, bool) {
+fn term_of(phase: Phase, e: &Elem, s: &State<'_>, certified: bool) -> (Objective, f64, bool) {
     let x = s.coords(e);
     let hex = e.kind == fieldcraft_model::ElementKind::Hex8;
-    let (q, valid, v) = if !certified && hex {
-        let (q, v) = hex8_scaled_jacobian(&x);
-        (q, q > 0.0, v)
+    let (q, valid, v, shaped) = if !certified && hex {
+        // The shape term of every sample, averaged: the smallest one's had a kink where the
+        // worst sample changes, over which the difference gradient turned within the difference
+        // step and a round-off change of the position turned the step with it (#612).
+        let (v, samples) = hex8_scaled_jacobian(&x);
+        let q = samples.iter().copied().fold(f64::INFINITY, f64::min);
+        (q, q > 0.0, v, samples.iter().map(|&c| shape(phase, c)).sum::<f64>() / samples.len() as f64)
     } else {
         let (q, valid) = measure(e, &x);
-        (q, valid, size(e.kind, &x))
+        (q, valid, size(e.kind, &x), shape(phase, q))
     };
     // An element stretched past the cap is as bad as an invalid one.
     let ratio = super::edge_ratio(e.kind, &x);
-    let stretch = if ratio > s.ratio_cap { INVALID * ratio / s.ratio_cap } else { 0.0 };
-    (phi(phase, q, valid, v, e.size0) + stretch, q, valid)
+    let stretch = if ratio > s.ratio_cap * (1.0 + ROUND_OFF) { ratio / s.ratio_cap } else { 0.0 };
+    (phi(q, shaped, valid, v, e.size0).plus(Objective { barrier: stretch, valid: 0.0 }), q, valid)
+}
+
+/// The change of the objective from the terms `from` to the terms `to` of the same elements,
+/// element by element: an element that did not change adds exactly nothing, where a difference
+/// of sums would add the round-off of its term, which (an invalid element's 1e11, or a bad
+/// element's q⁻¹⁶) can be far larger than the change of the elements that did (#612).
+fn change(to: &[Objective], from: &[Objective]) -> f64 {
+    to.iter().zip(from).map(|(a, b)| a.minus(*b)).sum()
 }
 
 impl State<'_> {
-    /// The objective over the elements at `n`.
-    fn local_objective(&self, phase: Phase, n: u32) -> f64 {
-        let mut f = 0.0;
-        for &i in self.around.get(&n).map(Vec::as_slice).unwrap_or(&[]) {
-            if let Some(e) = self.elems.get(i) {
-                f += term_of(phase, e, self, false).0;
-            }
-        }
-        f
+    /// The objective's terms of the elements at `n`.
+    fn local_objective(&self, phase: Phase, n: u32) -> Vec<Objective> {
+        let around = self.around.get(&n).map(Vec::as_slice).unwrap_or(&[]);
+        around.iter().filter_map(|&i| self.elems.get(i)).map(|e| term_of(phase, e, self, false).0).collect()
     }
 
     /// `n` moved by `d` under `freedom`, kept when the local objective drops below `f0`; the new
     /// local objective when kept.
-    fn try_lower(&mut self, phase: Phase, n: u32, freedom: Freedom, d: P, f0: f64) -> Option<f64> {
+    fn try_lower(&mut self, phase: Phase, n: u32, freedom: Freedom, d: P, f0: &[Objective]) -> Option<Vec<Objective>> {
         let p = self.at(n);
         let q = self.moved(freedom, p, d)?;
-        if dist(p, q) == 0.0 {
+        // A move of round-off is no move: whether it lowers the objective is round-off too.
+        if dist(p, q) <= ROUND_OFF * self.local_length(n) {
             return None;
         }
         let undo = self.place(n, q);
         let f = self.local_objective(phase, n);
-        if f < f0 {
+        if change(&f, f0) < 0.0 {
             Some(f)
         } else {
             self.restore(undo);
@@ -195,7 +243,7 @@ impl State<'_> {
             return false;
         }
         let mut f0 = self.local_objective(phase, n);
-        if f0 == 0.0 {
+        if f0.iter().all(|f| f.is_zero()) {
             return false;
         }
         let mut moved = false;
@@ -205,7 +253,7 @@ impl State<'_> {
             let c = scale(nb.iter().fold([0.0; 3], |s, &m| add(s, self.at(m))), 1.0 / nb.len() as f64);
             let d = sub(c, self.at(n));
             for k in [1.0, 0.5, 0.25] {
-                if let Some(f) = self.try_lower(phase, n, freedom, scale(d, k), f0) {
+                if let Some(f) = self.try_lower(phase, n, freedom, scale(d, k), &f0) {
                     f0 = f;
                     moved = true;
                     break;
@@ -222,7 +270,7 @@ impl State<'_> {
         let eps = 1e-5 * h;
         let mut g = [0.0; 3];
         for k in 0..3 {
-            let mut f = [0.0; 2];
+            let mut f = [Vec::new(), Vec::new()];
             for (j, sign) in [1.0, -1.0].into_iter().enumerate() {
                 let mut d = [0.0; 3];
                 d[k] = sign * eps;
@@ -233,19 +281,23 @@ impl State<'_> {
                         self.restore(undo);
                         v
                     }
-                    None => f0,
+                    None => f0.clone(),
                 };
             }
-            g[k] = (f[0] - f[1]) / (2.0 * eps);
+            g[k] = change(&f[0], &f[1]) / (2.0 * eps);
         }
         let gn = dot(g, g).sqrt();
         if !(gn > 0.0 && gn.is_finite()) {
             return moved;
         }
-        let dir = scale(g, -1.0 / gn);
+        // A gradient that changes the objective by less than a relative `TRUSTED_GRADIENT` over an
+        // edge length is mostly round-off in direction: the step shrinks with it.
+        let magnitude: f64 = f0.iter().map(|o| o.magnitude()).sum();
+        let trust = (gn * h / (TRUSTED_GRADIENT * magnitude)).min(1.0);
+        let dir = scale(g, -trust / gn);
         let mut t = *step;
         for attempt in 0..8 {
-            if let Some(_f) = self.try_lower(phase, n, freedom, scale(dir, t * h), f0) {
+            if let Some(_f) = self.try_lower(phase, n, freedom, scale(dir, t * h), &f0) {
                 // Grow after a first-try success, keep the shortened step otherwise.
                 *step = if attempt == 0 { (t * 2.0).min(0.5) } else { t };
                 return true;
@@ -327,7 +379,7 @@ pub struct Morphed {
 struct Checked {
     invalid: usize,
     worst: f64,
-    objective: f64,
+    objective: Objective,
     ratio: f64,
 }
 
@@ -335,7 +387,8 @@ impl Checked {
     /// Whether `self` (after a move) is better than `was`: fewer invalid elements, or as many
     /// with the worst valid one no worse and the objective lower.
     fn improves(&self, was: &Checked) -> bool {
-        self.invalid < was.invalid || (self.invalid == was.invalid && self.worst >= was.worst && self.objective < was.objective)
+        self.invalid < was.invalid
+            || (self.invalid == was.invalid && self.worst >= was.worst - ROUND_OFF && self.objective.minus(was.objective) < 0.0)
     }
 }
 
@@ -440,7 +493,7 @@ impl State<'_> {
             let now = self.certified(&touched);
             let keep = match guards {
                 Guards::Valid => now.invalid <= was.invalid,
-                Guards::Strict => now.improves(&was) && now.ratio <= self.ratio_cap.max(was.ratio),
+                Guards::Strict => now.improves(&was) && now.ratio <= self.ratio_cap.max(was.ratio) * (1.0 + ROUND_OFF),
             };
             if keep {
                 return Ok((region.len(), true));
@@ -464,7 +517,7 @@ impl State<'_> {
     /// Over elements `elems`, certified: how many are invalid, the worst quality of the valid
     /// ones, the smooth objective's sum and the largest edge ratio.
     fn certified(&self, elems: &BTreeSet<usize>) -> Checked {
-        let mut c = Checked { invalid: 0, worst: f64::INFINITY, objective: 0.0, ratio: 0.0 };
+        let mut c = Checked { invalid: 0, worst: f64::INFINITY, objective: Objective::default(), ratio: 0.0 };
         for &i in elems {
             let Some(e) = self.elems.get(i) else { continue };
             let x = self.coords(e);
@@ -474,7 +527,7 @@ impl State<'_> {
             } else {
                 c.invalid += 1;
             }
-            c.objective += phi(Phase::Smooth, q, valid, size(e.kind, &x), e.size0);
+            c.objective = c.objective.plus(phi(q, shape(Phase::Smooth, q), valid, size(e.kind, &x), e.size0));
             c.ratio = c.ratio.max(super::edge_ratio(e.kind, &x));
         }
         c
@@ -549,7 +602,10 @@ pub fn morph(model: &Model, nodes: &BTreeSet<u32>, options: MorphOptions, geomet
         let (q, min, mean) = s.qualities();
         (min, q.iter().filter(|v| **v < options.below).count(), mean)
     };
-    let better = |a: (f64, usize, f64), b: (f64, usize, f64)| a.0 > b.0 || (a.0 == b.0 && (a.1 < b.1 || (a.1 == b.1 && a.2 > b.2)));
+    // Qualities within round-off of each other are the same (#612).
+    let better = |a: (f64, usize, f64), b: (f64, usize, f64)| {
+        a.0 > b.0 + ROUND_OFF || (a.0 >= b.0 - ROUND_OFF && (a.1 < b.1 || (a.1 == b.1 && a.2 > b.2 + ROUND_OFF)))
+    };
     let mut best = (score(&state), original.clone());
     for round in 0..options.rounds {
         fieldcraft_model::progress::stage(&format!("morph round {}", round + 1), Some(options.rounds as f64), "rounds");
@@ -600,7 +656,7 @@ pub fn morph(model: &Model, nodes: &BTreeSet<u32>, options: MorphOptions, geomet
     let mut after = region_quality(&state);
     let (_, _, mut mean_after) = state.qualities();
     // Never worse than the start.
-    if after.invalid > before.invalid || after.min_quality < before.min_quality {
+    if after.invalid > before.invalid || after.min_quality < before.min_quality - ROUND_OFF {
         state.pos = original.clone();
         after = before.clone();
         mean_after = mean_before;

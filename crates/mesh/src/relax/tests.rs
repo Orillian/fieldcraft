@@ -636,3 +636,26 @@ fn guarded_relaxation_is_stable_under_round_off() {
         assert!(d < 1e-8, "n {n}: a 1-ulp input change moved a node by {d:e}");
     }
 }
+
+/// A 1-ulp change of the input moves the strong relaxation's result by round-off, not by a
+/// different path (#612: summed into one number, the objective's barrier of invalid elements and
+/// the q⁻¹⁶ of bad ones rounded away the change of the elements a node moves, so the sweeps
+/// followed round-off and moved nodes by up to 6.5e-2 here, a fraction of an edge of 0.17–0.26).
+/// What is left is round-off amplified over the sweeps (≤ 3e-8 seen); 1e-6 is far below any real
+/// path change.
+#[test]
+fn strong_relaxation_is_stable_under_round_off() {
+    for (n, amount) in [(6, 0.06), (8, 0.03)] {
+        let (original, m) = distorted_annulus(n, amount);
+        let b = round_trip(&m);
+        assert!(m.nodes().iter().any(|(l, p)| b.node(*l).unwrap().xyz != p.xyz), "the round trip changes some coordinates");
+        let geo = Geo { model: original.clone() };
+        let all: BTreeSet<u32> = m.nodes().keys().copied().collect();
+        let opts = MorphOptions { below: 0.9, ..MorphOptions::default() };
+        let (ra, rb) = (morph(&m, &all, opts, &geo).unwrap(), morph(&b, &all, opts, &geo).unwrap());
+        assert!(ra.moved > 0 && ra.after.min_quality > 0.9, "{:?} → {:?}", ra.before, ra.after);
+        let ap = |m: &Model, r: &Morphed| applied(m, &Relaxed { positions: r.positions.clone(), ..Relaxed::default() });
+        let d = largest_difference(&ap(&m, &ra), &ap(&b, &rb));
+        assert!(d < 1e-6, "n {n}: a 1-ulp input change moved a node by {d:e}");
+    }
+}

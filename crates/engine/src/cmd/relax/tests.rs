@@ -389,7 +389,8 @@ fn strong_mode_parameters_are_checked() {
 /// the other (#438). The fingerprint is of the nodes after mesh.hex.generate, after the
 /// perturbation and after the strong relaxation; CI checks it on Linux, it was taken on macOS
 /// (again for the model stored in SI, #579, and when the plate's O-grid kept the cut that
-/// rounding used to refuse, #605).
+/// rounding used to refuse, #605). Retaken on Linux when the strong relaxation's objective was
+/// compared element by element and a hex's term averaged its Jacobian samples (#612).
 #[test]
 fn mesh_and_strong_relaxation_are_the_same_bits_everywhere() {
     let fingerprint = |s: &Session, h: &mut u64| {
@@ -421,7 +422,7 @@ fn mesh_and_strong_relaxation_are_the_same_bits_everywhere() {
     // millimetres develop kept by an ulp for 6–18% of computed coordinates, and amplifies that
     // (on develop a 1-ulp nudge moves it as much): its bits differ from develop's. The plate's
     // tessellation comes from SolidCraft, so a SolidCraft bump moves the fingerprint too (v0.25.1).
-    assert_eq!(one, 0x042c_c785_a236_378a, "fingerprint {one:#018x}");
+    assert_eq!(one, 0xdf4b_c05a_c85d_d2cf, "fingerprint {one:#018x}");
 }
 
 /// A mesher's result depends on the stored model alone: relaxing, undoing and relaxing again
