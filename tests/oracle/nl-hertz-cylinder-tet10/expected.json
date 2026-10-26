@@ -1,0 +1,102 @@
+{
+ "title": "Hertz line contact on tet10 faces: a cylinder pressed on a flat (implicit mortar contact on curved quadratic faces)",
+ "kind": "theory",
+ "source": "H. Hertz, Über die Berührung fester elastischer Körper, J. reine angew. Math. 92:156–171, 1882; K. L. Johnson, Contact Mechanics, Cambridge University Press 1985, §4.3 (two-dimensional contact of cylindrical bodies): b = √(4PR/(πE*)), p₀ = 2P/(πb), with 1/E* = 2(1 − ν²)/E for two bodies of one material and R the cylinder's radius on a flat; outside the contact the gap h(x) = (b²/2R)[(x/b)√(x²/b² − 1) − ln(x/b + √(x²/b² − 1))], the integral of the slope √(x² − b²)/R that the elliptical pressure leaves",
+ "quantities": [
+  {
+   "id": "peak_pressure",
+   "quantity": "the largest contact pressure p₀ (at x = 0)",
+   "measure": {
+    "from": "solve",
+    "pointer": "/contacts/0/max_pressure/value"
+   },
+   "value": 2884.6153846153843,
+   "tolerance": {
+    "relative": 0.03
+   },
+   "reason": "p₀ = 2P/(πb) for the load per length P = 2265.57 N/mm, b = 0.5 mm; the contact width spans three or four tet10 faces of the graded mesh, and the largest nodal pressure is compared (corner and mid-side pressures alternate a little around the ellipse)"
+  },
+  {
+   "id": "normal_force",
+   "quantity": "the force across the contact (half model, 1 mm thick)",
+   "measure": {
+    "from": "solve",
+    "pointer": "/contacts/0/normal_force"
+   },
+   "value": 1132.7858125924733,
+   "tolerance": {
+    "relative": 0.002
+   },
+   "reason": "the pressure carries the whole load; the soft springs that hold the indenter before contact take a millionth"
+  },
+  {
+   "id": "gap_x0423",
+   "quantity": "the gap at the secondary node at x = 0.42285 (0.85 b, inside the contact)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Press",
+     "at": [
+      [
+       0.42285,
+       0.008944105976585348,
+       0
+      ]
+     ]
+    },
+    "pointer": "/nodes/0/contact/0/gap"
+   },
+   "value": 0.0,
+   "tolerance": {
+    "absolute": 1e-05
+   },
+   "reason": "within the half-width the surfaces touch: the last node before b is closed (the next node, at x = 0.514 > b, is open), so the contact's edge lies between them, as b = 0.5 says"
+  },
+  {
+   "id": "pressure_x0719",
+   "quantity": "the contact pressure at the secondary node at x = 0.71946 (1.44 b)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Press",
+     "at": [
+      [
+       0.71946,
+       0.025914713198005757,
+       0
+      ]
+     ]
+    },
+    "pointer": "/nodes/0/contact/0/pressure"
+   },
+   "value": 0.0,
+   "tolerance": {
+    "absolute": 1.0
+   },
+   "reason": "outside the contact there is no pressure (the nodes of the faces that hold the contact's edge, up to x = 0.605, carry part of the last closed node's pressure)"
+  },
+  {
+   "id": "gap_x0719",
+   "quantity": "the gap at the secondary node at x = 0.71946 (1.44 b, outside the contact)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Press",
+     "at": [
+      [
+       0.71946,
+       0.025914713198005757,
+       0
+      ]
+     ]
+    },
+    "pointer": "/nodes/0/contact/0/gap"
+   },
+   "value": 0.007288889983681425,
+   "tolerance": {
+    "relative": 0.25
+   },
+   "reason": "Hertz's separation beyond b; the foundation is ten half-widths wide and deep, not a half-plane, and the coarse faces round off the contact's edge"
+  }
+ ]
+}

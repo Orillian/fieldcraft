@@ -1,0 +1,25 @@
+{
+  "note": "FieldCraft's accepted results for this case, written by `cargo xtask oracle --bless`. A result outside its band fails CI.",
+  "values": {
+    "gap_x0423": {
+      "band": 0.00001,
+      "value": -2.5359254314514077e-8
+    },
+    "gap_x0719": {
+      "band": 7.615210737137492e-12,
+      "value": 0.0076152107371374915
+    },
+    "normal_force": {
+      "band": 1.1330543455859722e-6,
+      "value": 1133.0543455859722
+    },
+    "peak_pressure": {
+      "band": 2.8887227513703584e-6,
+      "value": 2888.7227513703583
+    },
+    "pressure_x0719": {
+      "band": 1.0,
+      "value": -0.0
+    }
+  }
+}

@@ -437,7 +437,9 @@ Nonlinear static, oracle cases:
 | Case | Reference | Quantity | Error | Tolerance |
 |---|---|---|---|---|
 | `nl-contact-patch` (hex8), `-plane-strain`, `-axisymmetric` (quad4) | theory: uniform σ, pressure equal to it, no lateral stress | stress ratios, pressure, integrated pressure over reaction | small sliding < 10⁻⁶; finite sliding ≤ 3.3·10⁻⁵ | 10⁻⁶ rel.; 0.02 % |
+| `nl-contact-patch-quadratic` (hex20) | theory: uniform σ, pressure equal to it at corners and mid-side nodes, no lateral stress | stress ratios, pressure, integrated pressure over reaction | small sliding < 10⁻⁶; finite sliding ≤ 2.1·10⁻⁵ | 10⁻⁶ rel.; 0.02 % |
 | `nl-hertz-cylinder`, `-plane-strain` | theory: Hertz line contact | peak pressure p₀; contact force; pressure at x = 0.296 and 0.367; σ_yy at depth 0.471 | 0.25 %; 0.022 %; −2.9 %, 6.1 %; 1.9 % | 2 %; 0.2 %; 5 %, 10 %; 4 % |
+| `nl-hertz-cylinder-hex20` / `-tet10` (curved quadratic faces, half the divisions) | theory: Hertz line contact | peak pressure p₀; contact force; gap at x = 0.42 (inside b); pressure and separation at x = 0.72 (outside b) | 0.14 % / 1.7 %; 0.024 % / 0.023 %; < 10⁻⁷; 0; 4.5 % / 21 % | 2 % / 3 %; 0.2 %; 10⁻⁵ abs.; 1 abs.; 10 % / 25 % |
 | `nl-friction-sliding-blocks` | theory: Coulomb slip | tangential over normal force (μ = 0.2); balance with the reaction; slipping nodes | −10⁻⁶; < 10⁻⁶; 9 of 9 | 0.1 %; 10⁻⁶ rel.; exact |
 
 Tests in `crates/solver/tests/contact.rs`: the contact patch test on non-matching hex8, tet4 and
