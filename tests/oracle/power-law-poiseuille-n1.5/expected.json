@@ -1,0 +1,76 @@
+{
+ "title": "Plane Poiseuille flow of a power-law fluid, n = 1.5",
+ "kind": "theory",
+ "source": "R. B. Bird, R. C. Armstrong, O. Hassager, Dynamics of Polymeric Liquids, Vol. 1: Fluid Mechanics, 2nd ed., Wiley (1987), §4.2 (the closed-form velocity of a power-law fluid between parallel plates)",
+ "quantities": [
+  {
+   "id": "u_centre",
+   "quantity": "streamwise velocity u at y = 0.484375 (the cell beside the mid-plane), m/s",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Run",
+     "points": [
+      [
+       0.015625,
+       0.484375,
+       0.015625
+      ]
+     ]
+    },
+    "pointer": "/points/0/velocity/0"
+   },
+   "value": 0.29906988219611236,
+   "tolerance": {
+    "absolute": 0.0006
+   },
+   "reason": "the lattice's discretisation error: the largest error of the three samples is 1.3e-3 of the peak velocity at 32 cells across, 3.9e-3 at 16 and 4e-4 at 64 (README); 2e-3 of the peak bounds the 32-cell error"
+  },
+  {
+   "id": "u_quarter",
+   "quantity": "streamwise velocity u at y = 0.234375 (the cell beside the quarter of the gap), m/s",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Run",
+     "points": [
+      [
+       0.015625,
+       0.234375,
+       0.015625
+      ]
+     ]
+    },
+    "pointer": "/points/0/velocity/0"
+   },
+   "value": 0.1954591180133216,
+   "tolerance": {
+    "absolute": 0.0006
+   },
+   "reason": "the lattice's discretisation error: the largest error of the three samples is 1.3e-3 of the peak velocity at 32 cells across, 3.9e-3 at 16 and 4e-4 at 64 (README); 2e-3 of the peak bounds the 32-cell error"
+  },
+  {
+   "id": "u_wall",
+   "quantity": "streamwise velocity u at y = 0.046875 (the second cell from the plate), m/s",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Run",
+     "points": [
+      [
+       0.015625,
+       0.046875,
+       0.015625
+      ]
+     ]
+    },
+    "pointer": "/points/0/velocity/0"
+   },
+   "value": 0.04539439860833194,
+   "tolerance": {
+    "absolute": 0.0006
+   },
+   "reason": "the lattice's discretisation error: the largest error of the three samples is 1.3e-3 of the peak velocity at 32 cells across, 3.9e-3 at 16 and 4e-4 at 64 (README); 2e-3 of the peak bounds the 32-cell error"
+  }
+ ]
+}

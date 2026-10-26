@@ -1,0 +1,7 @@
+[
+ {"command": "model.units", "params": {"system": "m-kg-s-N-Pa", "temperature": "°C"}},
+ {"command": "model.material.create", "params": {"name": "Fluid", "density": 1.0, "fluid": {"type": "power_law", "consistency": 0.2, "index": 0.5}}},
+ {"command": "model.fluid_domain.create", "params": {"name": "Channel", "material": "Fluid", "min": [0, 0, 0], "max": [0.03125, 1.0, 0.03125], "spacing": 0.03125, "acceleration": [0.4, 0, 0], "faces": {"x_min": {"type": "periodic"}, "x_max": {"type": "periodic"}, "z_min": {"type": "periodic"}, "z_max": {"type": "periodic"}}}},
+ {"command": "model.step.create", "params": {"name": "Run", "procedure": {"type": "fluid", "domain": "Channel", "end_time": 48.0, "time_step": 0.0009765625, "frames": 1}}},
+ {"command": "solve.fluid", "params": {"step": "Run"}, "id": "solve"}
+]
