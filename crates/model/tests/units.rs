@@ -38,6 +38,13 @@ fn hand_values() {
     // Expansion 12e-6 /°C = 12e-6 /K; 6.667e-6 /°F.
     assert!(close(si(Q::ThermalExpansion, "12e-6 °C⁻¹"), 12e-6));
     assert!(close(shown(Q::ThermalExpansion, 12e-6, Preset::InLbfS), 12e-6 * 5.0 / 9.0));
+    // PVT coefficients: 1.1 cm³/g = 1.1e-3 m³/kg = 1.1e9 mm³/t; 2.459e-7 K/Pa = 0.2459 K/MPa;
+    // 5.106e-8 1/Pa = 0.05106 1/MPa; 7.24e-7 m³/(kg·K) = 7.24e5 mm³/(t·K).
+    assert!(close(si(Q::SpecificVolume, "1.1 cm³/g"), 1.1e-3));
+    assert!(close(shown(Q::SpecificVolume, 1.1e-3, Preset::MmTonneS), 1.1e9));
+    assert!(close(shown(Q::TemperaturePerPressure, 2.459e-7, Preset::MmTonneS), 0.2459));
+    assert!(close(shown(Q::InversePressure, 5.106e-8, Preset::MmTonneS), 0.05106));
+    assert!(close(shown(Q::SpecificVolumePerTemperature, 7.24e-7, Preset::MmTonneS), 7.24e5));
     // 25 mm/s = 0.025 m/s; g = 9.81 m/s² = 9810 mm/s² = 386.22 in/s².
     assert!(close(si(Q::Velocity, "25 mm/s"), 0.025));
     assert!(close(shown(Q::Acceleration, 9.81, Preset::MmTonneS), 9810.0));

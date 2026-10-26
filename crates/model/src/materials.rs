@@ -1,5 +1,5 @@
 //! Materials: linear elasticity, mass density, fluid behaviour, thermal properties (conductivity,
-//! specific heat, expansion), and the inelastic behaviours: von Mises (J2) plasticity with a
+//! specific heat, expansion), pressure–volume–temperature behaviour ([`crate::pvt`]), and the inelastic behaviours: von Mises (J2) plasticity with a
 //! bilinear, tabulated or Johnson–Cook flow stress (explicit dynamics and nonlinear static
 //! steps), Johnson–Cook damage and element erosion criteria (explicit dynamics).
 //!
@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::pvt::Pvt;
 use crate::{Error, Model, Result, context, finite, insert_new, nonnegative, not_in_use, positive, remove_existing, replace_existing};
 
 /// Names of the engineering constants' shear moduli, in order.
@@ -590,12 +591,16 @@ pub struct Material {
     pub erosion: Option<Erosion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal: Option<Thermal>,
+    /// Specific volume (and so density) as a function of temperature and pressure: the
+    /// two-domain Tait equation of a polymer ([`Pvt::evaluate`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pvt: Option<Pvt>,
 }
 
 impl Material {
     pub fn validate(&self) -> Result<()> {
-        if self.elastic.is_none() && self.density.is_none() && self.fluid.is_none() && self.thermal.is_none() {
-            return Err(Error::Invalid("a material needs elastic constants, a density, fluid behaviour or thermal properties".into()));
+        if self.elastic.is_none() && self.density.is_none() && self.fluid.is_none() && self.thermal.is_none() && self.pvt.is_none() {
+            return Err(Error::Invalid("a material needs elastic constants, a density, fluid behaviour, thermal properties or PVT behaviour".into()));
         }
         if let Some(f) = &self.fluid {
             f.validate()?;
@@ -649,6 +654,9 @@ impl Material {
         }
         if let Some(t) = &self.thermal {
             t.validate()?;
+        }
+        if let Some(p) = &self.pvt {
+            p.validate()?;
         }
         Ok(())
     }
@@ -970,5 +978,28 @@ mod tests {
         assert!(serde_json::from_value::<Material>(serde_json::json!({"thermal": {"heat": 1}})).is_err());
         // Negative expansion (invar-like behaviour of some composites) is allowed.
         assert!(Thermal { expansion: Some(Directional::Isotropic(-1e-6)), ..Thermal::default() }.validate().is_ok());
+    }
+
+    #[test]
+    fn pvt_behaviour_gives_the_density() {
+        let m: Material = serde_json::from_value(serde_json::json!({
+            "pvt": {"type": "tait", "b5": 400.0, "b6": 2.5e-7, "b7": 5e-5, "b8": 0.1, "b9": 4e-8,
+                    "melt": {"b1": 1.23e-3, "b2": 9e-7, "b3": 8e7, "b4": 4.5e-3},
+                    "solid": {"b1": 1.14e-3, "b2": 4e-7, "b3": 1.5e8, "b4": 3.5e-3}}
+        }))
+        .unwrap();
+        m.validate().unwrap();
+        let back: Material = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        // 450 K, no pressure: the melt's b1 + b2 (T − b5), about 784 kg/m³.
+        let pvt = m.pvt.unwrap();
+        let rho = pvt.evaluate(450.0, 0.0).unwrap().density;
+        assert!((rho - 1.0 / (1.23e-3 + 9e-7 * 50.0)).abs() < 1e-9, "{rho}");
+        assert!(pvt.evaluate(f64::NAN, 0.0).is_err());
+        let mut bad = m.clone();
+        if let Some(crate::Pvt::Tait { b5, .. }) = &mut bad.pvt {
+            *b5 = -1.0;
+        }
+        assert!(bad.validate().is_err());
     }
 }

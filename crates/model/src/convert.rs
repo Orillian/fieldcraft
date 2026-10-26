@@ -21,7 +21,7 @@ fn each(values: &mut [f64], q: Q, f: &mut dyn FnMut(Q, &mut f64)) {
 
 impl Quantities for Material {
     fn quantities(&mut self, f: &mut dyn FnMut(Q, &mut f64)) {
-        let Material { elastic, hyperelastic, density, fluid, plastic, damage, erosion, thermal } = self;
+        let Material { elastic, hyperelastic, density, fluid, plastic, damage, erosion, thermal, pvt } = self;
         match elastic {
             Some(Elastic::Isotropic { young, poisson: _ }) => f(Q::Pressure, young),
             Some(Elastic::EngineeringConstants { young, poisson: _, shear }) => {
@@ -109,6 +109,19 @@ impl Quantities for Material {
             }
             directional(expansion, Q::ThermalExpansion, f);
             f(Q::Temperature, reference_temperature);
+        }
+        if let Some(Pvt::Tait { melt, solid, b5, b6, b7, b8, b9 }) = pvt {
+            for TaitDomain { b1, b2, b3, b4 } in [melt, solid] {
+                f(Q::SpecificVolume, b1);
+                f(Q::SpecificVolumePerTemperature, b2);
+                f(Q::Pressure, b3);
+                f(Q::ThermalExpansion, b4);
+            }
+            f(Q::Temperature, b5);
+            f(Q::TemperaturePerPressure, b6);
+            f(Q::SpecificVolume, b7);
+            f(Q::ThermalExpansion, b8);
+            f(Q::InversePressure, b9);
         }
     }
 }

@@ -51,6 +51,8 @@ quantities! {
     Mass = "mass", d(0, 1, 0, 0), "kg";
     RotaryInertia = "rotary_inertia", d(2, 1, 0, 0), "kg·m²";
     Density = "density", d(-3, 1, 0, 0), "kg/m³";
+    SpecificVolume = "specific_volume", d(3, -1, 0, 0), "m³/kg";
+    SpecificVolumePerTemperature = "specific_volume_per_temperature", d(3, -1, 0, -1), "m³/(kg·K)";
     Time = "time", d(0, 0, 1, 0), "s";
     Frequency = "frequency", d(0, 0, -1, 0), "Hz";
     AngularVelocity = "angular_velocity", d(0, 0, -1, 0), "rad/s";
@@ -65,6 +67,7 @@ quantities! {
     Force = "force", d(1, 1, -2, 0), "N";
     Moment = "moment", d(2, 1, -2, 0), "N·m";
     Pressure = "pressure", d(-1, 1, -2, 0), "Pa";
+    InversePressure = "inverse_pressure", d(1, -1, 2, 0), "1/Pa";
     ForcePerVolume = "force_per_volume", d(-2, 1, -2, 0), "N/m³";
     Stiffness = "stiffness", d(0, 1, -2, 0), "N/m";
     ForcePerLength = "force_per_length", d(0, 1, -2, 0), "N/m";
@@ -78,6 +81,7 @@ quantities! {
     Temperature = "temperature", d(0, 0, 0, 1), "K";
     TemperatureDifference = "temperature_difference", d(0, 0, 0, 1), "K";
     ThermalExpansion = "thermal_expansion", d(0, 0, 0, -1), "K⁻¹";
+    TemperaturePerPressure = "temperature_per_pressure", d(1, -1, 2, 1), "K/Pa";
     ThermalConductivity = "thermal_conductivity", d(1, 1, -3, -1), "W/(m·K)";
     SpecificHeat = "specific_heat", d(2, 0, -2, -1), "J/(kg·K)";
     HeatTransferCoefficient = "heat_transfer_coefficient", d(0, 1, -3, -1), "W/(m²·K)";

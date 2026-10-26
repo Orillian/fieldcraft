@@ -460,6 +460,43 @@ compression singularities.
 **B7. Shock capturing.** Lagrangian explicit captures shocks with artificial viscosity (A8). Godunov/Riemann-solver
 shock capturing belongs to Eulerian finite volume (E1); not needed for the Lagrangian solver.
 
+**B8. Polymer PVT: the modified two-domain Tait equation.** **Verdict: build on (implemented, #159:
+`crates/model/src/pvt.rs`, stored and evaluated, not yet used by a solver).** Added 2026-10-28; the DOIs below were
+checked against the DOI handle API and Crossref, as above.
+- **Citations.**
+  - R. Y. Chang, C. H. Chen, K. S. Su. *Modifying the Tait equation with cooling-rate effects to predict the
+    pressure–volume–temperature behaviors of amorphous polymers: modeling and experiments.* Polym. Eng. Sci.
+    36(13):1789–1795, 1996. DOI [10.1002/pen.10574](https://doi.org/10.1002/pen.10574).
+  - T. Willerer, T. Brinkmann, K. Drechsler. *Development and Application of a Cooling Rate Dependent PVT Model for
+    Injection Molding Simulation of Semi Crystalline Thermoplastics.* Polymers 16(22):3194, 2024. DOI
+    [10.3390/polym16223194](https://doi.org/10.3390/polym16223194) (open access; eqs. 1–9 write the form out with the
+    role of each coefficient; its Table 1 is a fitted set, its measurements are shown only as figures).
+  - E. J. Padilha Júnior, R. de P. Soares, N. S. M. Cardozo. *Analysis of equations of state for polymers.*
+    Polímeros 25(3):277–288, 2015. DOI [10.1590/0104-1428.1621](https://doi.org/10.1590/0104-1428.1621) (open access;
+    Tables 2 and 3 give two-domain Tait coefficients with standard errors for twelve polymers, among them PS and iPP,
+    fitted to the measurements of the two papers below; Table 4 the mean relative deviation of the fit). Neither
+    open-access source states a measured (T, p, v) point as a number: Padilha Júnior et al. list only the data
+    sources, ranges and point counts (Table 1), and Willerer et al. show their measurements as figures and give no fit
+    deviation. A coefficient-only case would check the equation against itself, so the validation case waits for
+    the measured tables below (checked 2026-10-29).
+- **Measured data (sources for a validation case; not open access).**
+  - P. Zoller, D. J. Walsh. *Standard Pressure–Volume–Temperature Data for Polymers.* Technomic, 1995; later CRC Press (tables of
+    measured specific volume for many polymers). **No DOI; (unverified)**.
+  - Y. Sato, Y. Yamasaki, S. Takishima, H. Masuoka. *Precise measurement of the PVT of polypropylene and polycarbonate
+    up to 330 °C and 200 MPa.* J. Appl. Polym. Sci. 66(1):141–150, 1997. DOI
+    [10.1002/(SICI)1097-4628(19971003)66:1<141::AID-APP17>3.0.CO;2-4](https://doi.org/10.1002/(SICI)1097-4628(19971003)66:1%3C141::AID-APP17%3E3.0.CO;2-4).
+  - L. A. Utracki. *Pressure–volume–temperature of molten and glassy polymers.* J. Polym. Sci. B Polym. Phys.
+    45(3):270–285, 2007. DOI [10.1002/polb.21031](https://doi.org/10.1002/polb.21031).
+- **Method.** `v(T, p) = v0(T) [1 − C ln(1 + p/B(T))] + vt(T, p)`, C = 0.0894; `v0 = b1 + b2 (T − b5)`,
+  `B = b3 exp(−b4 (T − b5))` with separate melt and solid coefficients split at `T_t(p) = b5 + b6 p`;
+  `vt = b7 exp(b8 (T − b5) − b9 p)` in the solid of a semi-crystalline polymer, 0 otherwise.
+- **Solves.** The density of a polymer at the temperature and pressure of a state: packing and shrinkage in moulding,
+  thermal and pressure-dependent density in later coupled work.
+- **Limits.** One cooling rate per coefficient set (Willerer et al. and Chang et al. add the rate); the bracket turns
+  negative far beyond the fitted pressure range (refused, never NaN); the step at T_t is a fit, not a model of
+  crystallisation kinetics.
+- **Complexity.** Trivial.
+
 ---
 
 ## Part C: Lattice Boltzmann method

@@ -50,6 +50,8 @@ const TABLE: &[Row] = {
         (Q::Mass, ["kg", "t", "kg", "g", "lbf·s²/in"]),
         (Q::RotaryInertia, ["kg·m²", "t·mm²", "kg·mm²", "g·mm²", "lbf·s²·in"]),
         (Q::Density, ["kg/m³", "t/mm³", "kg/mm³", "g/mm³", "lbf·s²/in⁴"]),
+        (Q::SpecificVolume, ["m³/kg", "mm³/t", "mm³/kg", "mm³/g", "in⁴/(lbf·s²)"]),
+        (Q::SpecificVolumePerTemperature, ["m³/(kg·K)", "mm³/(t·K)", "mm³/(kg·K)", "mm³/(g·K)", "in⁴/(lbf·s²·°F)"]),
         (Q::Time, ["s", "s", "ms", "ms", "s"]),
         (Q::Frequency, ["Hz", "Hz", "kHz", "kHz", "Hz"]),
         (Q::AngularVelocity, ["rad/s", "rad/s", "rad/ms", "rad/ms", "rad/s"]),
@@ -64,6 +66,7 @@ const TABLE: &[Row] = {
         (Q::Force, ["N", "N", "kN", "N", "lbf"]),
         (Q::Moment, ["N·m", "N·mm", "kN·mm", "N·mm", "lbf·in"]),
         (Q::Pressure, ["Pa", "MPa", "GPa", "MPa", "psi"]),
+        (Q::InversePressure, ["1/Pa", "1/MPa", "1/GPa", "1/MPa", "1/psi"]),
         (Q::ForcePerVolume, ["N/m³", "N/mm³", "kN/mm³", "N/mm³", "lbf/in³"]),
         (Q::Stiffness, ["N/m", "N/mm", "kN/mm", "N/mm", "lbf/in"]),
         (Q::ForcePerLength, ["N/m", "N/mm", "kN/mm", "N/mm", "lbf/in"]),
@@ -77,6 +80,7 @@ const TABLE: &[Row] = {
         (Q::Temperature, ["K", "°C", "°C", "°C", "°F"]),
         (Q::TemperatureDifference, ["K", "K", "K", "K", "°F"]),
         (Q::ThermalExpansion, ["K⁻¹", "K⁻¹", "K⁻¹", "K⁻¹", "°F⁻¹"]),
+        (Q::TemperaturePerPressure, ["K/Pa", "K/MPa", "K/GPa", "K/MPa", "°F/psi"]),
         (Q::ThermalConductivity, ["W/(m·K)", "mW/(mm·K)", "kW/(mm·K)", "W/(mm·K)", "lbf/(s·°F)"]),
         (Q::SpecificHeat, ["J/(kg·K)", "mJ/(t·K)", "J/(kg·K)", "mJ/(g·K)", "in²/(s²·°F)"]),
         (Q::HeatTransferCoefficient, ["W/(m²·K)", "mW/(mm²·K)", "kW/(mm²·K)", "W/(mm²·K)", "lbf/(in·s·°F)"]),
@@ -142,9 +146,11 @@ impl Default for DisplaySystem {
 }
 
 /// The quantities whose unit holds the temperature's step: they follow a temperature override.
-const PER_DEGREE: [Quantity; 6] = [
+const PER_DEGREE: [Quantity; 8] = [
     Quantity::TemperatureDifference,
     Quantity::ThermalExpansion,
+    Quantity::TemperaturePerPressure,
+    Quantity::SpecificVolumePerTemperature,
     Quantity::ThermalConductivity,
     Quantity::SpecificHeat,
     Quantity::HeatTransferCoefficient,

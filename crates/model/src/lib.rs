@@ -51,6 +51,7 @@ mod mesh;
 pub mod mesh_plans;
 pub mod nodal;
 pub mod progress;
+pub mod pvt;
 pub mod relaxations;
 pub mod rename;
 pub mod sections;
@@ -87,6 +88,7 @@ pub use mesh::{
     tet4_jacobian,
 };
 pub use mesh_plans::{CutRole, MeshPlan, PlanCut, PlanFeature, PlanMesher, PlanRing, PlanUnmapped, RingKind};
+pub use pvt::{Pvt, PvtDomain, PvtState, TaitDomain};
 pub use relaxations::{Relaxation, RelaxationCell};
 pub use sections::{BeamProfile, Extent, Formulation, Integration, Section, SectionKind};
 pub use seeds::{Bias, BiasToward, Divisions, Seed, SeedConstraint};

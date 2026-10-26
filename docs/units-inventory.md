@@ -24,6 +24,7 @@ Conversion goes at the command/file boundary; storage becomes SI.
 | | JC room/melt temperature, thermal reference_temperature | temperature (absolute) |
 | | conductivity, specific_heat, expansion | conductivity, specific heat, expansion (1/ΔT) |
 | | density; fluid viscosity (doc: "1e-9 MPa·s for water") | density; dynamic viscosity |
+| `pvt.rs` | Tait b1, b7; b2; b3; b4, b8; b5; b6; b9 (#159) | **specific volume** (m³/kg); **specific volume per temperature** (m³/(kg·K)); pressure; expansion (1/ΔT); temperature (absolute); **temperature per pressure** (K/Pa); **inverse pressure** (1/Pa) — the four new quantities follow the display system's volume, mass, pressure and temperature step (`units/display.rs`) |
 | `sections.rs` | profile dims, shell thickness/offset, 2D thickness, area | length, area |
 | `loads.rs` | force, moment, traction, pressure, gravity, body force, centrifugal ω/point, surface flux, film, sink, heat source power, temperature | force, moment, pressure, acceleration, force/volume, angular velocity, heat flux, HTC, temperature, heat generation |
 | `bcs.rs` | displacement `[Option<f64>; 6]` (3 lengths + 3 rotations rad), temperature | length, angle, temperature |
