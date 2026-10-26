@@ -109,6 +109,15 @@ pub struct ComponentCheck {
     pub ok: Option<bool>,
 }
 
+/// A shear-dependent fluid's relaxation times in the run statistics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShearDependentTau {
+    /// τ⁺ at the flow's characteristic shear rate (unbounded).
+    pub characteristic: f64,
+    /// `[τ_min, τ_max]`, the range each cell's own τ⁺ is held in.
+    pub range: [f64; 2],
+}
+
 /// Run statistics.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FluidStats {
@@ -117,10 +126,18 @@ pub struct FluidStats {
     pub steps: u64,
     pub time_step: f64,
     pub end_time: f64,
+    /// τ⁺: the fluid's, or with a shear-dependent fluid the reference τ⁺ that sets τ⁻ (the one at
+    /// the characteristic shear rate held within the cells' range), while each cell relaxes with
+    /// its own.
     pub tau_plus: f64,
     pub tau_minus: f64,
     pub magic: f64,
     pub collision: fieldcraft_model::Collision,
+    /// With a shear-dependent fluid: τ⁺ at the flow's characteristic shear rate, and the range
+    /// `[τ_min, τ_max]` each cell's own τ⁺ is held in. Reported by the solve, not saved: the
+    /// results encoding skips it (none when read back), so results saved before it read unchanged.
+    #[serde(skip)]
+    pub shear_dependent_tau: Option<ShearDependentTau>,
     /// The characteristic velocity (model units), its lattice value and its lattice Mach number.
     pub velocity: f64,
     pub lattice_velocity: f64,
@@ -418,6 +435,9 @@ pub fn run(setup: &Setup, flow: &mut dyn Backend, limits: &Limits) -> Result<Flu
         ));
     }
     warnings.extend(flow.wall_y_plus().and_then(crate::wall::unresolved_wall));
+    if let (Some(clamps), Some(r)) = (flow.viscosity_clamps(), &setup.rheology) {
+        warnings.extend(clamps.warning(flow.fluid_cells(), r.tau));
+    }
     for body in flow.empty_obstacles() {
         warnings.push(format!("obstacle `{body}` covers no cell centre: it is smaller than the spacing or outside the box"));
     }
@@ -461,6 +481,7 @@ pub fn run(setup: &Setup, flow: &mut dyn Backend, limits: &Limits) -> Result<Flu
             tau_minus: setup.tau_minus,
             magic: setup.magic,
             collision: setup.collision,
+            shear_dependent_tau: setup.shear_dependent_tau,
             velocity: setup.velocity,
             lattice_velocity: setup.lattice_velocity,
             mach: setup.mach,

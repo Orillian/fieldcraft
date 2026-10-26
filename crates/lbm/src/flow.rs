@@ -105,6 +105,7 @@ use crate::bounce::{WallNode, WallNodes};
 use crate::conduction::{Interface, Layout, SolidHeat};
 use crate::lattice::{C, Q, W, c, equilibrium, moving_wall, opposite};
 use crate::outlet::{Action, Outlets, Populations};
+use crate::rheology::{Clamp, Clamps, Rheology};
 use crate::setup::{MAX_LATTICE_SPEED, Obstacle, Setup, ZoneKind, ZoneSetup};
 use crate::voxel::{Grid, TriangleTree, voxelise};
 use crate::wall::Walls;
@@ -412,6 +413,11 @@ pub struct Flow {
     /// With it, the cells that collide: the fluid cells less the boundary nodes (empty
     /// otherwise: every fluid cell collides).
     bulk: Vec<bool>,
+    /// A shear-dependent fluid: each cell's relaxation time from its own shear rate.
+    rheology: Option<Rheology>,
+    /// With one: the cells whose relaxation time was clamped, low and high, in the last
+    /// collision and over the run.
+    clamps: Clamps,
     acceleration: [f64; 3],
     /// The momentum transferred to each group in the last step (lattice units).
     forces: Vec<[f64; 3]>,
@@ -972,6 +978,8 @@ impl Flow {
             wall_bounce: setup.wall_model == Some(WallModel::SpaldingBounceHalfway),
             nodes: on_node.then(|| WallNodes::new(node_list, nu)),
             bulk,
+            rheology: setup.rheology,
+            clamps: Clamps::default(),
             acceleration: setup.acceleration,
             forces: vec![[0.0; 3]; groups.len()],
             groups,
@@ -1278,6 +1286,16 @@ impl Flow {
     /// The turbulent Prandtl number of Smagorinsky's model (its turbulent diffusivity ν_t / Pr_t).
     pub fn turbulent_prandtl(&self) -> f64 {
         self.turbulent_prandtl
+    }
+
+    /// A shear-dependent fluid's relaxation-time model, when the fluid has one.
+    pub fn rheology(&self) -> Option<&Rheology> {
+        self.rheology.as_ref()
+    }
+
+    /// With a shear-dependent fluid: how many cells' relaxation times were clamped.
+    pub fn viscosity_clamps(&self) -> Option<Clamps> {
+        self.rheology.is_some().then_some(self.clamps)
     }
 
     /// The largest eddy viscosity over the fluid's own viscosity in the last step (0 without a
@@ -1826,6 +1844,9 @@ impl Flow {
         let walls = self.walls.as_ref();
         let wall_model = self.wall_model;
         let model_walls = walls.filter(|_| wall_model);
+        let rheology = self.rheology.as_ref();
+        // The lattice temperatures a temperature-dependent viscosity reads (the last step's).
+        let temperatures: &[f64] = self.thermal.as_ref().map_or(&[], |t| &t.temperature);
         // Λ, which the two relaxation times keep when the eddy viscosity changes τ⁺.
         let magic = (1.0 / wp - 0.5) * (1.0 / wm - 0.5);
         let constant = self.acceleration;
@@ -1838,6 +1859,8 @@ impl Flow {
         let mut maxima = vec![0.0f64; blocks.len()];
         // The largest eddy viscosity per block (lattice units).
         let mut eddies = vec![0.0f64; blocks.len()];
+        // Each block's clamped relaxation times, low and high.
+        let mut clamped = vec![[0u64; 2]; blocks.len()];
         // with heat, each block's velocities go to its slice of cell_u (empty otherwise), and
         // with an eddy viscosity too, its eddy viscosities to its slice of cell_nu_t
         let mut u_blocks: Vec<&mut [[f64; 3]]> = self.cell_u.chunks_mut(block).collect();
@@ -1855,19 +1878,24 @@ impl Flow {
             &'a mut f64,
             &'a mut Vec<(u32, [f64; 3])>,
             &'a mut [f64; 3],
+            &'a mut [u64; 2],
         );
         let mut work: Vec<Work> = Vec::with_capacity(blocks.len());
         let mut u_iter = u_blocks.drain(..);
         let mut nu_iter = nu_blocks.drain(..);
-        for ((((f, m), e), r), sg) in blocks.iter_mut().zip(maxima.iter_mut()).zip(eddies.iter_mut()).zip(removed.iter_mut()).zip(sigmas.iter_mut()) {
-            work.push((f, m, u_iter.next(), nu_iter.next(), e, r, sg));
+        for (((((f, m), e), r), sg), c) in
+            blocks.iter_mut().zip(maxima.iter_mut()).zip(eddies.iter_mut()).zip(removed.iter_mut()).zip(sigmas.iter_mut()).zip(clamped.iter_mut())
+        {
+            work.push((f, m, u_iter.next(), nu_iter.next(), e, r, sg, c));
         }
-        parallel::for_each_mut(&mut work, |b, (f, block_max, u_out, nu_out, max_nu, removed, sigma_stats)| {
+        parallel::for_each_mut(&mut work, |b, (f, block_max, u_out, nu_out, max_nu, removed, sigma_stats, block_clamped)| {
             let mut fq = [0.0; Q];
             let mut post = [0.0; Q];
             // The block's largest speed, kept here and stored once: the blocks' maxima share
             // cache lines, so a store per cell bounced those lines between the threads (#643).
             let mut max_u2 = 0.0f64;
+            // The block's clamped relaxation times, likewise kept here and stored once.
+            let mut cell_clamps = [0u64; 2];
             let len = f.first().map_or(0, |d| d.len());
             for i in 0..len {
                 if !fluid.get(b * block + i).copied().unwrap_or(false) {
@@ -1927,7 +1955,18 @@ impl Flow {
                 };
                 let explicit = (nu_vreman > 0.0).then(|| 1.0 / (1.0 / wp + 3.0 * nu_vreman));
                 // Smagorinsky's implicit rate of the cell's own flux (Hou et al.).
-                let implicit = || crate::turbulence::omega(&crate::turbulence::flux(&fq, rho, u, force, forced), rho, wp, cell_c);
+                let flux = || crate::turbulence::flux(&fq, rho, u, force, forced);
+                let implicit = || crate::turbulence::omega(&flux(), rho, wp, cell_c);
+                // A shear-dependent fluid's rate from the cell's flux, counting a clamped one.
+                let mut own_rate = |r: &Rheology, p: &[f64; 6]| {
+                    let (tau, clamp) = r.relax(p, rho, temperatures.get(b * block + i).copied().unwrap_or(0.0));
+                    match clamp {
+                        Clamp::None => {}
+                        Clamp::Low => cell_clamps[0] += 1,
+                        Clamp::High => cell_clamps[1] += 1,
+                    }
+                    1.0 / tau
+                };
                 // A wall cell under the wall model relaxes with its viscosity instead.
                 if regularized {
                     // With dynamic σ the subgrid model sets σ and stays out of the rate: the
@@ -1967,7 +2006,23 @@ impl Flow {
                         };
                         (cell_sigma, crate::hrr::strain(g))
                     });
-                    let w = crate::regularized::rebuild(&fq, rho, u, force, rate, c, forced, blend.as_ref().map(|(s, st)| (*s, st)), &mut post);
+                    // The cell's rate: a shear-dependent fluid's of its flux (not at a wall cell
+                    // under the wall model), Smagorinsky's, or the one above.
+                    let w =
+                        crate::regularized::rebuild(
+                            &fq,
+                            rho,
+                            u,
+                            force,
+                            forced,
+                            blend.as_ref().map(|(s, st)| (*s, st)),
+                            &mut post,
+                            |p| match rheology.filter(|_| wall_rate.is_none()) {
+                                Some(r) => own_rate(r, p),
+                                None if c > 0.0 => crate::turbulence::omega(p, rho, rate, c),
+                                None => rate,
+                            },
+                        );
                     if turbulent {
                         eddy(nu_model.unwrap_or_else(|| from_rate(w)));
                     }
@@ -1977,11 +2032,15 @@ impl Flow {
                     continue;
                 }
                 if mrt {
-                    // The stresses' rate: the wall model's, Smagorinsky's of the cell's flux, or the fluid's.
+                    // The stresses' rate: the wall model's, Smagorinsky's of the cell's flux, a
+                    // shear-dependent fluid's, or the fluid's.
                     let rate = match wall_rate {
                         Some(w) => w,
                         None if smagorinsky > 0.0 => implicit(),
-                        None => explicit.unwrap_or(wp),
+                        None => match rheology {
+                            Some(r) => own_rate(r, &flux()),
+                            None => explicit.unwrap_or(wp),
+                        },
                     };
                     if turbulent {
                         eddy(from_rate(rate));
@@ -1992,8 +2051,10 @@ impl Flow {
                     }
                     continue;
                 }
-                // The cell's own rates where the eddy viscosity raises τ⁺ (τ⁻ follows, keeping Λ).
-                let cell_rate = wall_rate.or_else(|| (smagorinsky > 0.0).then(implicit)).or(explicit);
+                // The cell's own rates where the eddy viscosity or a shear-dependent fluid sets τ⁺
+                // (τ⁻ follows, keeping Λ).
+                let cell_rate =
+                    wall_rate.or_else(|| (smagorinsky > 0.0).then(implicit)).or(explicit).or_else(|| rheology.map(|r| own_rate(r, &flux())));
                 if turbulent {
                     eddy(from_rate(cell_rate.unwrap_or(wp)));
                 }
@@ -2034,6 +2095,7 @@ impl Flow {
                 }
             }
             **block_max = max_u2;
+            **block_clamped = cell_clamps;
         });
         drop(work);
         if wall_model && let Some(walls) = &mut self.walls {
@@ -2046,6 +2108,11 @@ impl Flow {
         });
         // The largest eddy viscosity over the fluid's own (a maximum: no order dependence).
         self.eddy_ratio = if turbulent && nu0 > 0.0 { eddies.iter().fold(0.0f64, |m, x| m.max(*x)) / nu0 } else { 0.0 };
+        if self.rheology.is_some() {
+            // Counts: integer sums, the same in any order.
+            let last = clamped.iter().fold([0u64; 2], |s, c| [s[0] + c[0], s[1] + c[1]]);
+            self.clamps.add(last);
+        }
         // The largest speed of all blocks (a maximum does not depend on the order), or NaN.
         if maxima.iter().any(|m| m.is_nan()) { f64::NAN } else { maxima.iter().fold(0.0, |m, x| m.max(*x)) }
     }
@@ -2406,6 +2473,10 @@ impl crate::backend::Backend for Flow {
 
     fn wall_y_plus(&self) -> Option<f64> {
         Flow::wall_y_plus(self)
+    }
+
+    fn viscosity_clamps(&self) -> Option<Clamps> {
+        Flow::viscosity_clamps(self)
     }
 
     fn empty_obstacles(&self) -> &[String] {

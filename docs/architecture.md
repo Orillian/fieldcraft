@@ -358,8 +358,9 @@ cantilever's free-vibration period against `solve.frequency`.
 pressure and temperature at points and wall force and heat histories). Papers are cited in the
 module docs and in `docs/solvers/literature.md` (Part I).
 
-1. **Model.** A fluid material (density, Newtonian viscosity; conductivity and specific heat
-   for heat), a fluid domain (box, cubic cell spacing, a condition on each box face: wall,
+1. **Model.** A fluid material (density; a Newtonian viscosity or a shear-dependent one — power
+   law, Carreau–Yasuda, Cross, or Cross-WLF, which also follows the temperature — that each
+   cell relaxes with at its own shear rate, `rheology`; conductivity and specific heat for heat), a fluid domain (box, cubic cell spacing, a condition on each box face: wall,
    moving wall, slip, velocity inlet with a uniform or parabolic profile, pressure outlet,
    periodic pair; obstacle bodies and moving-wall conditions on their named faces; initial
    velocity; body acceleration; optional `thermal` settings: the initial temperature, a thermal

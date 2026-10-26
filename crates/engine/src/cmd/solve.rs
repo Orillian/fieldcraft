@@ -934,7 +934,7 @@ fn fluid_summary(r: &FluidResult, display: &DisplaySystem) -> Value {
         let (lo, hi) = fluid.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| (lo.min(t), hi.max(t)));
         json!({"min": lo, "max": hi})
     });
-    json!({
+    let mut v = json!({
         "step": r.step,
         "backend": r.stats.backend,
         "cells": r.stats.cells,
@@ -964,7 +964,14 @@ fn fluid_summary(r: &FluidResult, display: &DisplaySystem) -> Value {
         "stop": r.steady.as_ref().map(|s| steady_summary(s, &r.stats, display)),
         "zones": zones,
         "warnings": r.warnings,
-    })
+    });
+    // A shear-dependent fluid: `tau` is the reference τ⁺ (the characteristic one held within
+    // the range), each cell relaxing with its own.
+    if let Some(t) = r.stats.shear_dependent_tau {
+        v["tau_characteristic"] = json!(t.characteristic);
+        v["tau_range"] = json!(t.range);
+    }
+    v
 }
 
 /// The quantity of a steady-state monitor's values, by its name in the report (`velocity`,
@@ -2104,6 +2111,7 @@ pub(crate) mod tests {
             tau_minus: 0.6,
             magic: 0.25,
             collision: fieldcraft_model::Collision::Trt,
+            shear_dependent_tau: None,
             velocity: 1.0,
             lattice_velocity: 0.1,
             mach: 0.17,

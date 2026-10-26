@@ -92,12 +92,13 @@ const NORM3: [f64; 2] = [13.5, 4.5];
 
 /// Post-collision populations of one cell: `fq` before the collision, its density `rho`, its
 /// velocity `u` (with the half force) and its force per volume `force` (`forced`: whether there is
-/// one anywhere in the flow; without, the force terms are skipped), relaxation rate `omega`.
-/// With a Smagorinsky constant `smagorinsky` above zero the cell relaxes with
-/// [`crate::turbulence::omega`] of its own flux instead. Returns the rate it relaxed with.
+/// one anywhere in the flow; without, the force terms are skipped). The cell relaxes with the
+/// rate `rate` gives for its non-equilibrium flux `P` (xx, yy, zz, xy, xz, yz): the fluid's own,
+/// [`crate::turbulence::omega`] with an eddy viscosity, or a shear-dependent fluid's
+/// ([`crate::rheology`]). Returns the rate it relaxed with.
 #[inline(always)]
-pub fn collide(fq: &[f64; Q], rho: f64, u: [f64; 3], force: [f64; 3], omega: f64, smagorinsky: f64, forced: bool, out: &mut [f64; Q]) -> f64 {
-    rebuild(fq, rho, u, force, omega, smagorinsky, forced, None, out)
+pub fn collide(fq: &[f64; Q], rho: f64, u: [f64; 3], force: [f64; 3], forced: bool, out: &mut [f64; Q], rate: impl FnOnce(&[f64; 6]) -> f64) -> f64 {
+    rebuild(fq, rho, u, force, forced, None, out, rate)
 }
 
 /// [`collide`], with the non-equilibrium flux the populations are rebuilt from optionally
@@ -112,11 +113,10 @@ pub(crate) fn rebuild(
     rho: f64,
     u: [f64; 3],
     force: [f64; 3],
-    omega: f64,
-    smagorinsky: f64,
     forced: bool,
     hybrid: Option<(f64, &[f64; 6])>,
     out: &mut [f64; Q],
+    rate: impl FnOnce(&[f64; 6]) -> f64,
 ) -> f64 {
     // The momentum flux Σ c c f: xx, yy, zz, xy, xz, yz (opposite directions share c c, so by
     // pairs).
@@ -140,7 +140,7 @@ pub(crate) fn rebuild(
         let iso = if a == b { cs2 } else { 0.0 };
         p[k] = pi[k] - rho * (iso + u[a] * u[b]) + if forced { 0.5 * (u[a] * force[b] + force[a] * u[b]) } else { 0.0 };
     }
-    let omega = if smagorinsky > 0.0 { crate::turbulence::omega(&p, rho, omega, smagorinsky) } else { omega };
+    let omega = rate(&p);
     // The hybrid collision's blend, with τ̄ = 1/ω the cell's own relaxation time.
     if let Some((sigma, strain)) = hybrid
         && sigma != 1.0
@@ -261,7 +261,7 @@ mod tests {
         let (rho, j, pi, _) = moments(&f);
         let u = [0, 1, 2].map(|k| (j[k] + 0.5 * force[k]) / rho);
         let mut out = [0.0; Q];
-        collide(&f, rho, u, force, omega, 0.0, true, &mut out);
+        collide(&f, rho, u, force, true, &mut out, |_| omega);
         let (r2, j2, pi2, m3) = moments(&out);
         assert!((r2 - rho).abs() < 1e-15, "mass");
         for k in 0..3 {
@@ -304,7 +304,7 @@ mod tests {
             f[q] = crate::lattice::equilibrium(q, 0.97, [0.0; 3]);
         }
         let mut out = [0.0; Q];
-        collide(&f, 0.97, [0.0; 3], [0.0; 3], 1.7, 0.0, false, &mut out);
+        collide(&f, 0.97, [0.0; 3], [0.0; 3], false, &mut out, |_| 1.7);
         for q in 0..Q {
             assert!((out[q] - f[q]).abs() < 1e-16, "{q}");
         }

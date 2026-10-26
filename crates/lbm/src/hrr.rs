@@ -183,7 +183,12 @@ mod tests {
         strain: &[f64; 6],
         out: &mut [f64; Q],
     ) -> f64 {
-        crate::regularized::rebuild(f, rho, u, force, omega, smagorinsky, forced, Some((sigma, strain)), out)
+        crate::regularized::rebuild(f, rho, u, force, forced, Some((sigma, strain)), out, |p| rate(p, rho, omega, smagorinsky))
+    }
+
+    /// The fluid's rate `omega`, or Smagorinsky's of the flux `p` with a constant above zero.
+    fn rate(p: &[f64; 6], rho: f64, omega: f64, smagorinsky: f64) -> f64 {
+        if smagorinsky > 0.0 { crate::turbulence::omega(p, rho, omega, smagorinsky) } else { omega }
     }
 
     fn state() -> ([f64; Q], f64, [f64; 3], [f64; 3]) {
@@ -208,7 +213,7 @@ mod tests {
         let s = [1e-3, -2e-3, 5e-4, 3e-3, -1e-3, 2e-3];
         for smagorinsky in [0.0, 0.17] {
             let (mut a, mut b) = ([0.0; Q], [0.0; Q]);
-            let wa = crate::regularized::collide(&f, rho, u, force, 1.7, smagorinsky, true, &mut a);
+            let wa = crate::regularized::collide(&f, rho, u, force, true, &mut a, |p| rate(p, rho, 1.7, smagorinsky));
             let wb = collide(&f, rho, u, force, 1.7, smagorinsky, true, 1.0, &s, &mut b);
             assert_eq!(wa.to_bits(), wb.to_bits());
             for q in 0..Q {

@@ -256,6 +256,7 @@ The reply of `solve.fluid`, in the display units (its `units` names them):
 | `step`, `backend` | The step, and what stepped it: `cpu` or `gpu: <adapter>`. |
 | `cells`, `fluid_cells`, `steps`, `time_step`, `end_time` | The grid and the run. |
 | `tau`, `tau_minus`, `magic`, `collision` | τ⁺, τ⁻, Λ and the collision operator. |
+| `tau_characteristic`, `tau_range` | With a shear-dependent fluid each cell relaxes with its own τ⁺: `tau_characteristic` is τ⁺ at the flow's characteristic shear rate, `tau_range` the `[τ_min, τ_max]` each cell's own is held in, and `tau` the characteristic one held within that range (the reference that sets `tau_minus`). |
 | `velocity_scale`, `lattice_velocity`, `mach` | The characteristic velocity U, U Δt/Δx and the lattice Mach number. |
 | `eddy_viscosity_ratio` | With a turbulence model, the largest ν_t/ν in the last step. |
 | `frames` | The time of every frame. |

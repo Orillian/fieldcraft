@@ -613,6 +613,12 @@ impl GpuFlow {
 
     /// [`GpuFlow::new`] with `options`.
     pub fn with_options(flow: &Flow, policy: Policy, options: Options) -> Result<GpuFlow> {
+        if let Some(r) = flow.rheology() {
+            return Err(Error::Invalid(format!(
+                "the GPU backend does not step a shear-dependent viscosity yet (a {} fluid): solve on the CPU (`backend: \"cpu\"`)",
+                r.fluid.name()
+            )));
+        }
         if let Some(zone) = flow.zones().first() {
             return Err(Error::Invalid(format!(
                 "the GPU backend does not step fans or porous zones yet (`{}`): solve on the CPU (`backend: \"cpu\"`)",

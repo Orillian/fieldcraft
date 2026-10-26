@@ -818,6 +818,39 @@ D3Q19 f32 ≈ 80 B/cell (with flags): 10⁸ cells ≈ 8 GB. These numbers decide
   accuracy, which cut cells with the flux on the true surface recover; a steady run scales the
   solids' heat capacity, so its transient is not physical.
 
+### C10. Shear-dependent (generalised Newtonian) viscosity, as implemented
+
+**Verdict: built on the CPU (`crates/lbm/src/rheology.rs`, the models in `fieldcraft_model::Fluid`, #156); the GPU, turbulence models and porous zones refuse it for now.**
+- **Local shear rate.** The non-equilibrium momentum flux carries the strain rate, `P ≈ −2 ρ c_s² τ S` (Krüger et
+  al. 2017, C1.2, §4.1 and §6.3), so `γ̇ = |P| / (√2 ρ c_s² τ)` with no finite differences. J. Boyd, J. Buick,
+  S. Green. *A second-order accurate lattice Boltzmann non-Newtonian flow model.* J. Phys. A: Math. Gen.
+  39(46):14241–14247, 2006. DOI [10.1088/0305-4470/39/46/001](https://doi.org/10.1088/0305-4470/39/46/001): the
+  shear rate from the same moments, second order in power-law channel flow.
+- **Bounded relaxation time.** S. Gabbanelli, G. Drazer, J. Koplik. *Lattice Boltzmann method for non-Newtonian
+  (power-law) fluids.* PRE 72:046312, 2005. DOI [10.1103/PhysRevE.72.046312](https://doi.org/10.1103/PhysRevE.72.046312):
+  τ held within a stable range (a shear-thinning fluid at rest otherwise reaches an unbounded viscosity). We hold
+  each cell's τ⁺ in `[0.505, 5]`, count the clamped cells and report them; a fluid floored at every shear rate is
+  refused.
+- **The cell's τ.** τ and γ̇ depend on each other, but `σ = τ γ̇ = 3 |P| / (√2 ρ)` is known, so each cell solves
+  `τ − ½ − 3 ν(σ/τ) = 0`, which has one root because the shear stress `η(γ̇) γ̇` grows with γ̇ for every model here.
+  Regula falsi with the Illinois modification, bracketed by the τ range and capped at 64 iterations:
+  M. Dowell, P. Jarratt. *A modified regula falsi method for computing the root of an equation.* BIT 11(2):168–174,
+  1971. DOI [10.1007/BF01934364](https://doi.org/10.1007/BF01934364). With a constant viscosity the first step lands
+  on the Newtonian τ, so the Newtonian limits match the Newtonian solver bit for bit.
+- **Models.** Power law; Carreau–Yasuda (P. J. Carreau, Trans. Soc. Rheol. 16(1):99–127, 1972,
+  DOI [10.1122/1.549276](https://doi.org/10.1122/1.549276); K. Yasuda, R. C. Armstrong, R. E. Cohen, Rheol. Acta
+  20:163–178, 1981, DOI [10.1007/BF01513059](https://doi.org/10.1007/BF01513059)); Cross (M. M. Cross, J. Colloid
+  Sci. 20(5):417–437, 1965, DOI [10.1016/0095-8522(65)90022-X](https://doi.org/10.1016/0095-8522(65)90022-X));
+  Cross-WLF for polymer melts, which reads each cell's temperature from the scalar lattice: C. A. Hieber, S. F. Shen.
+  *A finite-element/finite-difference simulation of the injection-molding filling process.* J. Non-Newtonian Fluid
+  Mech. 7(1):1–32, 1980. DOI [10.1016/0377-0257(80)85012-9](https://doi.org/10.1016/0377-0257(80)85012-9), with the
+  shift of M. L. Williams, R. F. Landel, J. D. Ferry, J. Am. Chem. Soc. 77(14):3701–3707, 1955.
+  DOI [10.1021/ja01619a008](https://doi.org/10.1021/ja01619a008). The closed form of power-law Poiseuille flow:
+  R. B. Bird, R. C. Armstrong, O. Hassager, *Dynamics of Polymeric Liquids* vol. 1, 2nd ed., Wiley 1987, ch. 4.
+- **Verification.** Theory only so far: power-law Poiseuille flow against its closed form (n = 0.5 and 1.5,
+  `tests/oracle/power-law-poiseuille-*`), the Newtonian limits and Carreau–Yasuda's plateaus. A published benchmark
+  or experiment with tabulated channel or pipe data is still open.
+
 ---
 
 ## Part D: Fluid–structure interaction

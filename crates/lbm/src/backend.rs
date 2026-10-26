@@ -67,6 +67,12 @@ pub trait Backend {
     fn wall_y_plus(&self) -> Option<f64> {
         None
     }
+    /// With a shear-dependent fluid: how many cells' relaxation times were clamped. A backend
+    /// without shear-dependent viscosity refuses such a flow when it is made, so the default is
+    /// none.
+    fn viscosity_clamps(&self) -> Option<crate::rheology::Clamps> {
+        None
+    }
     fn groups(&self) -> &[Group];
     fn fluid_cells(&self) -> usize;
     fn is_fluid(&self, cell: usize) -> bool;

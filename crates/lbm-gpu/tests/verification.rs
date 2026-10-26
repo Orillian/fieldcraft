@@ -1671,6 +1671,23 @@ fn a_shear_wave_decays_at_the_exact_rate_on_the_gpu() {
     }
 }
 
+/// A shear-dependent viscosity has no GPU kernel yet: refused by name before any device work, so
+/// it says what to do even on a machine without a GPU (#156).
+#[test]
+fn a_shear_dependent_viscosity_is_refused_clearly() {
+    let mut m = model(1.0, 0.1, domain([0.0; 3], [4.0, 2.0, 2.0], 1.0), step(10.0, 1.0, None));
+    let thinning = fieldcraft_model::Fluid::PowerLaw { consistency: 0.1, index: 0.5, reference_shear_rate: None };
+    let mut fluid = m.material("Fluid").cloned().expect("the fluid");
+    fluid.fluid = Some(thinning);
+    m.replace_material("Fluid", fluid).expect("a power-law fluid");
+    let mut d = m.fluid_domain("Flow").cloned().expect("the domain");
+    d.faces.y_max = fieldcraft_model::FaceCondition::MovingWall { velocity: [0.1, 0.0, 0.0] };
+    m.replace_fluid_domain("Flow", d).expect("a lid");
+    let (_, flow) = prepare(&m, &[]);
+    let e = GpuFlow::with_options(&flow, Policy::from_env().expect("FIELDCRAFT_GPU names a policy"), Options::default()).err().map(|e| e.to_string());
+    assert!(e.as_deref().is_some_and(|e| e.contains("shear-dependent") && e.contains("power-law") && e.contains("cpu")), "{e:?}");
+}
+
 // ---- Conducting solids ----
 
 /// A column across y with a powered conducting slab against the cold plate and another against

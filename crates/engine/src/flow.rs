@@ -606,6 +606,7 @@ pub(crate) mod tests {
             tau_minus: 1.0,
             magic: 0.25,
             collision: fieldcraft_model::Collision::Trt,
+            shear_dependent_tau: None,
             velocity: 1.0,
             lattice_velocity: 0.1,
             mach: 0.1,

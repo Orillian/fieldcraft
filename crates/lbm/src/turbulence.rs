@@ -63,6 +63,12 @@ pub fn flux(fq: &[f64; Q], rho: f64, u: [f64; 3], force: [f64; 3], forced: bool)
     p
 }
 
+/// `P:P` of a non-equilibrium flux `p` as [`flux`] gives it (the off-diagonal terms twice).
+#[inline(always)]
+pub fn flux_norm2(p: &[f64; 6]) -> f64 {
+    p[0] * p[0] + p[1] * p[1] + p[2] * p[2] + 2.0 * (p[3] * p[3] + p[4] * p[4] + p[5] * p[5])
+}
+
 /// The bound on the flux's round-off over its magnitude (see the module docs, "Round-off").
 pub const ROUND_OFF: f64 = 16.0;
 
@@ -80,7 +86,7 @@ pub fn flux_round_off(rho: f64) -> f64 {
 #[inline(always)]
 pub fn eddy_viscosity(p: &[f64; 6], rho: f64, omega0: f64, c: f64, floor: f64) -> f64 {
     let tau0 = 1.0 / omega0;
-    let pp = p[0] * p[0] + p[1] * p[1] + p[2] * p[2] + 2.0 * (p[3] * p[3] + p[4] * p[4] + p[5] * p[5]);
+    let pp = flux_norm2(p);
     if !(pp > floor * floor) {
         return 0.0;
     }
@@ -95,7 +101,7 @@ pub fn eddy_viscosity(p: &[f64; 6], rho: f64, omega0: f64, c: f64, floor: f64) -
 #[inline(always)]
 pub fn omega(p: &[f64; 6], rho: f64, omega0: f64, c: f64) -> f64 {
     let tau0 = 1.0 / omega0;
-    let pp = p[0] * p[0] + p[1] * p[1] + p[2] * p[2] + 2.0 * (p[3] * p[3] + p[4] * p[4] + p[5] * p[5]);
+    let pp = flux_norm2(p);
     let tau = 0.5 * (tau0 + (tau0 * tau0 + 18.0 * std::f64::consts::SQRT_2 * c * c * pp.sqrt() / rho).sqrt());
     if tau.is_finite() && tau >= tau0 { 1.0 / tau } else { omega0 }
 }

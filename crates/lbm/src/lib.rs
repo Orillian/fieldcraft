@@ -1,7 +1,7 @@
 //! FieldCraft's lattice Boltzmann flow solver (CPU).
 //!
 //! It solves a fluid step of the model ([`fieldcraft_model::Procedure::Fluid`]) in its fluid
-//! domain: weakly compressible, isothermal, Newtonian flow on a uniform grid of cubic cells that
+//! domain: weakly compressible flow, Newtonian or shear-dependent, on a uniform grid of cubic cells that
 //! fills the domain's box, less the cells inside the obstacle bodies.
 //!
 //! - [`voxel`]: which cells the obstacles take, decided with exact predicates from the
@@ -15,6 +15,8 @@
 //! - [`outlet`]: convective pressure outlets, which carry a wake or vortices out of the box.
 //! - [`solve`]: the time loop, output frames and force histories in model units.
 //! - [`steady`]: the steady-state monitor and stop rule of a run.
+//! - [`rheology`]: shear-dependent viscosity (power law, Carreau–Yasuda, Cross, Cross-WLF), each
+//!   cell relaxing with the viscosity at its own shear rate.
 //!
 //! # Sources
 //! - T. Krüger, H. Kusumaatmaja, A. Kuzmin, O. Shardt, G. Silva, E. M. Viggen, *The Lattice
@@ -66,6 +68,7 @@ pub mod memory;
 pub mod mrt;
 pub mod outlet;
 pub mod regularized;
+pub mod rheology;
 pub mod setup;
 pub mod solve;
 pub mod steady;
@@ -80,7 +83,8 @@ pub use memory::{DeviceBuffer, Memory};
 pub use setup::{ContactSetup, SolidSetup, ThermalSetup};
 pub use setup::{Obstacle, Setup, ZoneKind, ZoneSetup, fluid_step};
 pub use solve::{
-    ComponentCheck, FluidResult, FluidStats, ForceHistory, Frame, HeatHistory, Peak, SolidResult, ZoneHistory, run, solve_fluid, solve_fluid_on,
+    ComponentCheck, FluidResult, FluidStats, ForceHistory, Frame, HeatHistory, Peak, ShearDependentTau, SolidResult, ZoneHistory, run, solve_fluid,
+    solve_fluid_on,
 };
 pub use steady::{Average, MonitorSample, SteadyReport, SteadySetup, StopReason};
 pub use voxel::Grid;

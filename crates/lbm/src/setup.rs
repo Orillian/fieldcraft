@@ -33,6 +33,7 @@ use fieldcraft_model::{
     Turbulence, WallModel,
 };
 
+use crate::rheology::{Rheology, shear_rate_at_stress};
 use crate::voxel::Grid;
 use crate::{Error, Limits, Result};
 
@@ -202,7 +203,8 @@ pub struct Setup {
     pub step: String,
     pub domain: FluidDomain,
     pub grid: Grid,
-    /// ρ₀ and the kinematic viscosity ν = μ / ρ₀, in model units.
+    /// ρ₀ and the kinematic viscosity ν = μ / ρ₀, in model units (of a shear-dependent fluid,
+    /// at the flow's characteristic shear rate: what the time step and τ⁺ are chosen for).
     pub density: f64,
     pub viscosity: f64,
     pub time_step: f64,
@@ -246,6 +248,11 @@ pub struct Setup {
     pub steady: Option<crate::steady::SteadySetup>,
     /// The domain's porous zones, then its fans, in lattice units.
     pub zones: Vec<ZoneSetup>,
+    /// A shear-dependent fluid: each cell's own relaxation time (`crate::rheology`).
+    pub rheology: Option<Rheology>,
+    /// With one: τ⁺ at the flow's characteristic shear rate, before `tau_plus` holds it within
+    /// the cells' range, and that range.
+    pub shear_dependent_tau: Option<crate::solve::ShearDependentTau>,
     pub warnings: Vec<String>,
 }
 
@@ -412,6 +419,43 @@ fn lattice_thermal(c: &ThermalCondition, flux_scale: f64, zero: f64) -> Result<T
     })
 }
 
+/// Check a shear-dependent fluid's relaxation time `tau` at the flow's characteristic shear rate
+/// against the range `rheology` holds each cell's own in, warning where it leaves it. Refused
+/// only when the fluid is floored at every shear rate: its largest viscosity (at the coldest
+/// temperature the flow starts with or holds; a flux drawing heat out sets no bound) still gives
+/// a τ below τ_min, so no cell would follow the fluid's model.
+fn shear_dependent_floor(rheology: &Rheology, domain: &FluidDomain, initial_kelvin: f64, tau: f64, warnings: &mut Vec<String>) -> Result<()> {
+    let [min_tau, max_tau] = rheology.tau;
+    if tau > max_tau {
+        warnings.push(format!(
+            "the relaxation time τ = {tau:.3} at the flow's characteristic shear rate is above {max_tau}, the largest a cell of a shear-dependent fluid takes: where the shear is that low the viscosity is capped; a shorter time step lowers every τ"
+        ));
+    }
+    if tau >= min_tau {
+        return Ok(());
+    }
+    // Colder is more viscous; only a temperature-dependent fluid reads it.
+    let coldest = domain.thermal.as_ref().filter(|_| rheology.fluid.needs_temperature()).map_or(initial_kelvin, |t| {
+        let held = BoxFace::ALL.iter().map(|f| t.faces.get(*f)).chain(t.surfaces.iter().map(|sb| &sb.condition));
+        held.fold(t.initial_temperature, |m, c| match *c {
+            ThermalCondition::Temperature { value } => m.min(value),
+            ThermalCondition::Flux { value } if value < 0.0 => f64::NEG_INFINITY,
+            _ => m,
+        })
+    });
+    let largest = rheology.largest_tau(coldest);
+    if !(largest >= min_tau) {
+        return Err(Error::Invalid(format!(
+            "the {} viscosity is below what the grid resolves at this time step at every shear rate (τ = {largest:.5} at its largest viscosity, below {min_tau}), so no cell would follow the fluid's model: refine the spacing or raise the time step",
+            rheology.fluid.name()
+        )));
+    }
+    warnings.push(format!(
+        "the relaxation time τ = {tau:.5} at the flow's characteristic shear rate is below {min_tau}: cells sheared that fast relax at {min_tau}, their viscosity floored (counted in the run's warnings); a finer spacing or a longer time step resolves them"
+    ));
+    Ok(())
+}
+
 impl Setup {
     /// Convert a fluid step, checking it against the stability limits and `limits`.
     pub fn new(model: &Model, step: Option<&str>, obstacles: &[Obstacle], limits: &Limits) -> Result<Setup> {
@@ -458,17 +502,30 @@ impl Setup {
         let (Some(density), Some(fluid)) = (material.and_then(|m| m.density), material.and_then(|m| m.fluid)) else {
             return Err(Error::Invalid(format!("material `{}` needs a density and fluid behaviour", domain.material)));
         };
-        let Some(mu) = fluid.newtonian() else {
-            return Err(Error::Invalid(format!(
-                "material `{}` has a {} viscosity: the lattice Boltzmann solver does not support shear-dependent viscosity yet",
-                domain.material,
-                fluid.name()
-            )));
-        };
-        let viscosity = mu / density;
-        if !(viscosity > 0.0 && viscosity.is_finite()) {
+        // A Newtonian fluid's kinematic viscosity; a shear-dependent one's is taken at the flow's
+        // characteristic shear rate once that is known.
+        let newtonian = fluid.newtonian().map(|mu| mu / density);
+        if let Some(viscosity) = newtonian
+            && !(viscosity > 0.0 && viscosity.is_finite())
+        {
             return Err(Error::Invalid(format!("the kinematic viscosity μ/ρ of material `{}` is {viscosity}", domain.material)));
         }
+        if newtonian.is_none() {
+            let what = format!("material `{}` has a {} viscosity", domain.material, fluid.name());
+            if turbulence.is_some() {
+                return Err(Error::Invalid(format!(
+                    "{what}: a turbulence model with a shear-dependent viscosity is not supported yet; leave out `turbulence`"
+                )));
+            }
+            if let Some(z) = domain.porous.first() {
+                return Err(Error::Invalid(format!(
+                    "{what}: porous zones (`{}`) with a shear-dependent viscosity are not supported yet (their Darcy resistance needs one viscosity)",
+                    z.name
+                )));
+            }
+        }
+        // The temperature a shear-dependent viscosity is first taken at: the initial one.
+        let initial_kelvin = domain.thermal.as_ref().map_or(0.0, |t| t.initial_temperature);
 
         // The grid.
         let counts = domain.cells()?;
@@ -512,15 +569,42 @@ impl Setup {
             u_char = u_char.max((2.0 * (hi - lo) / density).sqrt());
         }
         let a = norm(domain.acceleration);
+        let extents: Vec<f64> = (0..3).map(|k| domain.max[k] - domain.min[k]).collect();
+        let small = extents.iter().copied().fold(f64::INFINITY, f64::min);
+        // A shear-dependent fluid's shear rates scale with the narrowest gap between faces that
+        // are not periodic (a periodic axis has no walls across it; one cell thick in a 2D run).
+        let gap = (0..3).filter(|&k| !domain.faces.periodic(k)).filter_map(|k| extents.get(k).copied()).fold(f64::INFINITY, f64::min);
+        let gap = if gap.is_finite() { gap } else { small };
         if a > 0.0 {
-            let extents: Vec<f64> = (0..3).map(|k| domain.max[k] - domain.min[k]).collect();
-            let small = extents.iter().copied().fold(f64::INFINITY, f64::min);
             let large = extents.iter().copied().fold(0.0, f64::max);
-            u_char = u_char.max((a * small * small / (8.0 * viscosity)).min((2.0 * a * large).sqrt()));
+            let viscous = match newtonian {
+                Some(viscosity) => a * small * small / (8.0 * viscosity),
+                // A plane channel's wall stress ρ a H / 2 holds for any fluid; at its wall shear
+                // rate γ̇_w the Newtonian peak speed is γ̇_w H / 4.
+                None => shear_rate_at_stress(&fluid, density * a * gap / 2.0, initial_kelvin).map_or(f64::INFINITY, |g| g * gap / 4.0),
+            };
+            u_char = u_char.max(viscous.min((2.0 * a * large).sqrt()));
         }
         if !u_char.is_finite() {
             return Err(Error::Invalid("the flow's velocity scale is not a finite number".into()));
         }
+        let viscosity = match newtonian {
+            Some(viscosity) => viscosity,
+            None => {
+                // The wall shear rate of a plane channel's parabola at that speed, 4 u / H.
+                let rate = 4.0 * u_char / gap;
+                let nu = fluid.viscosity(rate, initial_kelvin) / density;
+                if !(nu > 0.0 && nu.is_finite()) {
+                    return Err(Error::Invalid(format!(
+                        "the {} viscosity of material `{}` at the flow's characteristic shear rate {rate:.3e} is {:e}: give the flow a velocity scale (an inlet, a moving wall, a pressure difference or an acceleration)",
+                        fluid.name(),
+                        domain.material,
+                        nu * density
+                    )));
+                }
+                nu
+            }
+        };
 
         // The time step and the number of steps.
         let diffusive = (AUTO_TAU_MAX - 0.5) * h * h / (3.0 * viscosity);
@@ -570,14 +654,34 @@ impl Setup {
                 "the lattice Mach number is {mach:.3} (velocity {u_char} with time step {dt} and spacing {h}), above {MAX_MACH}: lower the time step"
             )));
         }
-        let min_tau = if turbulence.is_some() { MIN_TAU_TURBULENT } else { MIN_TAU };
-        if !(tau_plus >= min_tau) {
-            let model = if turbulence.is_some() { "" } else { ", or add a turbulence model (`turbulence`)" };
-            return Err(Error::Invalid(format!(
-                "the relaxation time τ = {tau_plus:.5} is below {min_tau}: the grid cannot resolve viscosity {viscosity} at this time step (cell Reynolds number {:.1}); refine the spacing or raise the time step{model}",
-                if nu > 0.0 { lattice_velocity / nu } else { f64::INFINITY }
-            )));
-        }
+        let mut warnings = Vec::new();
+        // A shear-dependent fluid in lattice units; its temperatures count from the scalar
+        // lattice's zero.
+        let rheology = newtonian.is_none().then(|| Rheology {
+            fluid,
+            rate_scale: 1.0 / dt,
+            viscosity_scale: dt / (density * h * h),
+            tau: [MIN_TAU, crate::rheology::MAX_TAU],
+            zero: domain.thermal.as_ref().map_or(initial_kelvin, |t| t.temperature_zero),
+        });
+        let shear_dependent_tau = rheology.as_ref().map(|r| crate::solve::ShearDependentTau { characteristic: tau_plus, range: r.tau });
+        let tau_plus = if let Some(r) = &rheology {
+            // A shear-dependent fluid: τ⁺ at the characteristic shear rate, while each cell takes
+            // its own within [τ_min, τ_max]. A cell sheared past τ_min's viscosity is floored
+            // there (counted), so only a fluid floored at every shear rate is refused.
+            shear_dependent_floor(r, &domain, initial_kelvin, tau_plus, &mut warnings)?;
+            tau_plus.clamp(r.tau[0], r.tau[1])
+        } else {
+            let min_tau = if turbulence.is_some() { MIN_TAU_TURBULENT } else { MIN_TAU };
+            if !(tau_plus >= min_tau) {
+                let model = if turbulence.is_some() { "" } else { ", or add a turbulence model (`turbulence`)" };
+                return Err(Error::Invalid(format!(
+                    "the relaxation time τ = {tau_plus:.5} is below {min_tau}: the grid cannot resolve viscosity {viscosity} at this time step (cell Reynolds number {:.1}); refine the spacing or raise the time step{model}",
+                    if nu > 0.0 { lattice_velocity / nu } else { f64::INFINITY }
+                )));
+            }
+            tau_plus
+        };
         let magic_given = magic.is_some();
         let magic = magic.unwrap_or(DEFAULT_MAGIC);
         let tau_minus = 0.5 + magic / (tau_plus - 0.5);
@@ -591,7 +695,6 @@ impl Setup {
 
         // Heat: the scalar lattice's relaxation time from the diffusivity, the conditions in
         // lattice units (a flux is a temperature per step through a cell face).
-        let mut warnings = Vec::new();
         let mut thermal = match &domain.thermal {
             None => None,
             Some(t) => {
@@ -779,6 +882,8 @@ impl Setup {
             thermal,
             steady: steady.as_ref().map(|r| crate::steady::SteadySetup::new(r, n, dt)).transpose()?,
             zones,
+            rheology,
+            shear_dependent_tau,
             warnings,
             domain,
         })
