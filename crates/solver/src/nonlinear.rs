@@ -1335,6 +1335,7 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
     let mut warnings: Vec<String> =
         notes.into_iter().chain(resolved.warnings.iter().map(ToString::to_string)).chain(mesh.warnings.iter().cloned()).collect();
     check_supported(model, &mesh, step, settings, &mut warnings)?;
+    warnings.extend(fieldcraft_model::initial::left_out(model, step));
     let (graph, order) = pattern(&mesh);
     ignored_dashpots(&mesh, &mut warnings);
     let setup = Setup { model, resolved: &resolved, mesh: &mesh, step };
@@ -1391,7 +1392,7 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
     // forces, a dead load proportional to the load factor like the temperatures.
     if let Some(field) = problem.field.take() {
         let linear: Vec<bool> = (0..mesh.elements.len()).map(|i| problem.kinematics(i).is_none()).collect();
-        add_element_thermal_loads(&mut problem.dead, &mesh, &field, |i| linear.get(i).copied().unwrap_or(false))?;
+        add_element_thermal_loads(&mut problem.dead, &mesh, &field, &[], |i| linear.get(i).copied().unwrap_or(false))?;
         problem.field = Some(field);
     }
     let (lo, hi) = mesh.xyz.iter().fold(([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]), |(lo, hi), p| {
@@ -1716,7 +1717,7 @@ fn stresses(
             Some(kin) => kernel.nonlinear_stresses(material, &ue, kin, problem.temperature(i, lambda).as_ref(), history),
             None => {
                 let per_node: Vec<[f64; 3]> = el.nodes.iter().map(|n| displacement.get(*n).copied().unwrap_or_default()).collect();
-                let thermal = problem.field.as_deref().and_then(|f| el.thermal_strain(f)).map(|mut t| {
+                let thermal = problem.field.as_deref().and_then(|f| el.thermal_strain(f, &[])).map(|mut t| {
                     t.delta.iter_mut().for_each(|d| *d *= lambda);
                     t
                 });

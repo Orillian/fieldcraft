@@ -18,7 +18,7 @@ use fieldcraft_fem::shell::{Shell, ShellSection};
 use fieldcraft_fem::truss::{Truss, young_modulus};
 use fieldcraft_fem::{DofKind, DofLayout, DofSet, Elasticity, ElementDofs, PointStress, elasticity, face, plane};
 use fieldcraft_model::nodal::edge_pressure;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use fieldcraft_model::{Elastic, ElementKind, Hyperelastic, Integration, Load, Model, Resolved, SectionKind, Step, Target, centrifugal_acceleration};
@@ -111,6 +111,30 @@ impl Kernel<'_> {
         }
     }
 
+    /// Integration-point stresses as [`Self::stresses_with`], from an initial stress given at
+    /// the nodes when there is one (solid elements only so far).
+    pub fn stresses_from(
+        &self,
+        d: &Elasticity,
+        u: &[[f64; 3]],
+        thermal: Option<&ThermalStrain>,
+        initial: Option<&[[f64; 6]]>,
+    ) -> fieldcraft_fem::Result<Vec<PointStress>> {
+        match (self, initial) {
+            (Kernel::Solid(s), _) => s.stresses_from(d, u, thermal, initial),
+            (Kernel::Plane(_), None) => self.stresses_with(d, u, thermal),
+            (Kernel::Plane(_), Some(_)) => Err(fieldcraft_fem::Error::NotSupported("an initial stress in 2D elements".into())),
+        }
+    }
+
+    /// The equivalent nodal forces of an initial stress given at the nodes, as 3-vectors.
+    pub fn initial_stress_load(&self, d: &Elasticity, initial: &[[f64; 6]]) -> fieldcraft_fem::Result<Vec<[f64; 3]>> {
+        match self {
+            Kernel::Solid(s) => s.initial_stress_load(d, initial),
+            Kernel::Plane(_) => Err(fieldcraft_fem::Error::NotSupported("an initial stress in 2D elements".into())),
+        }
+    }
+
     /// The equivalent nodal forces of a thermal strain, as 3-vectors (Z zero for 2D).
     pub fn thermal_load(&self, d: &Elasticity, thermal: &ThermalStrain) -> fieldcraft_fem::Result<Vec<[f64; 3]>> {
         match self {
@@ -187,10 +211,21 @@ impl Elem {
         k.map_err(|e| Error::element(self.label, e))
     }
 
-    /// The element's thermal strain in a temperature field (nodes the field leaves out are at
-    /// the reference temperature); `None` when the material does not expand or nothing changes.
-    pub fn thermal_strain(&self, field: &[Option<f64>]) -> Option<ThermalStrain> {
-        thermal_strain(self.expansion, &self.nodes, field)
+    /// The element's thermal strain in a temperature field, measured from the nodes' initial
+    /// temperatures (`initial`, by node; the material's reference temperature where it has
+    /// none); a node the field leaves out stays where it started. `None` when the material does
+    /// not expand or nothing changes.
+    pub fn thermal_strain(&self, field: &[Option<f64>], initial: &[Option<f64>]) -> Option<ThermalStrain> {
+        thermal_strain(self.expansion, &self.nodes, field, initial)
+    }
+
+    /// The initial stress at the element's nodes (zero where a node has none); `None` when no
+    /// node of it has one.
+    pub fn initial_stress(&self, initial: &[Option<[f64; 6]>]) -> Option<Vec<[f64; 6]>> {
+        if !self.nodes.iter().any(|n| initial.get(*n).is_some_and(Option::is_some)) {
+            return None;
+        }
+        Some(self.nodes.iter().map(|n| initial.get(*n).copied().flatten().unwrap_or_default()).collect())
     }
 }
 
@@ -216,17 +251,19 @@ impl Bar {
     }
 
     /// The member's thermal strain in a temperature field, as for [`Elem::thermal_strain`].
-    pub fn thermal_strain(&self, field: &[Option<f64>]) -> Option<ThermalStrain> {
-        thermal_strain(self.expansion, &self.nodes, field)
+    pub fn thermal_strain(&self, field: &[Option<f64>], initial: &[Option<f64>]) -> Option<ThermalStrain> {
+        thermal_strain(self.expansion, &self.nodes, field, initial)
     }
 }
 
-/// The thermal strain of an element of nodes `nodes` in a temperature field (nodes the field
-/// leaves out are at the reference temperature); `None` when the material does not expand or
+/// The thermal strain of an element of nodes `nodes` in a temperature field, measured from the
+/// nodes' initial temperatures (the reference temperature where `initial` has none; nodes the
+/// field leaves out stay where they started); `None` when the material does not expand or
 /// nothing changes.
-fn thermal_strain(expansion: Option<([f64; 3], f64)>, nodes: &[usize], field: &[Option<f64>]) -> Option<ThermalStrain> {
+fn thermal_strain(expansion: Option<([f64; 3], f64)>, nodes: &[usize], field: &[Option<f64>], initial: &[Option<f64>]) -> Option<ThermalStrain> {
     let (alpha, reference) = expansion?;
-    let delta: Vec<f64> = nodes.iter().map(|n| field.get(*n).copied().flatten().map_or(0.0, |t| t - reference)).collect();
+    let start = |n: usize| initial.get(n).copied().flatten().unwrap_or(reference);
+    let delta: Vec<f64> = nodes.iter().map(|n| field.get(*n).copied().flatten().map_or(0.0, |t| t - start(*n))).collect();
     delta.iter().any(|d| *d != 0.0).then_some(ThermalStrain { alpha, delta })
 }
 
@@ -973,11 +1010,12 @@ pub(crate) fn hold(slot: Option<&mut Option<f64>>, value: f64, conflict: impl Fn
     }
 }
 
-/// Add the equivalent nodal forces of the thermal strains of a temperature field.
-pub fn add_thermal_loads(f: &mut [f64], mesh: &Mesh, field: &[Option<f64>]) -> Result<()> {
-    add_element_thermal_loads(f, mesh, field, |_| true)?;
+/// Add the equivalent nodal forces of the thermal strains of a temperature field, measured from
+/// the initial temperatures.
+pub fn add_thermal_loads(f: &mut [f64], mesh: &Mesh, field: &[Option<f64>], initial: &[Option<f64>]) -> Result<()> {
+    add_element_thermal_loads(f, mesh, field, initial, |_| true)?;
     for t in &mesh.trusses {
-        let Some(th) = t.thermal_strain(field) else { continue };
+        let Some(th) = t.thermal_strain(field, initial) else { continue };
         let forces = t.truss()?.thermal_load(t.young, t.area, &th).map_err(|err| Error::element(t.label, err))?;
         for (node, v) in t.nodes.iter().zip(forces) {
             add(f, &translations(mesh, *node)?, v);
@@ -988,15 +1026,95 @@ pub fn add_thermal_loads(f: &mut [f64], mesh: &Mesh, field: &[Option<f64>]) -> R
 
 /// Add the equivalent nodal forces of the thermal strains of the solid and 2D elements whose
 /// index `keep` accepts.
-pub fn add_element_thermal_loads(f: &mut [f64], mesh: &Mesh, field: &[Option<f64>], keep: impl Fn(usize) -> bool) -> Result<()> {
+pub fn add_element_thermal_loads(
+    f: &mut [f64],
+    mesh: &Mesh,
+    field: &[Option<f64>],
+    initial: &[Option<f64>],
+    keep: impl Fn(usize) -> bool,
+) -> Result<()> {
     for (_, e) in mesh.elements.iter().enumerate().filter(|(i, _)| keep(*i)) {
-        let Some(th) = e.thermal_strain(field) else { continue };
+        let Some(th) = e.thermal_strain(field, initial) else { continue };
         let forces = e.kernel()?.thermal_load(&e.d, &th).map_err(|err| Error::element(e.label, err))?;
         for (node, v) in e.nodes.iter().zip(forces) {
             add(f, &translations(mesh, *node)?, v);
         }
     }
     Ok(())
+}
+
+/// The model's initial fields on a mesh, by mesh node ([`Mesh::labels`] order): empty when the
+/// model has none of the kind or the step takes none.
+#[derive(Debug, Clone, Default)]
+pub struct InitialState {
+    pub temperature: Vec<Option<f64>>,
+    pub stress: Vec<Option<[f64; 6]>>,
+}
+
+impl InitialState {
+    /// The initial fields step `step` starts from, with a warning for each kind of item they
+    /// leave out: labels the mesh no longer has, shells, beams and trusses under an initial
+    /// stress, and steps that take no initial fields. An initial stress on a 2D element is an
+    /// error (not supported yet).
+    pub fn new(model: &Model, mesh: &Mesh, step: &Step, warnings: &mut Vec<String>) -> Result<InitialState> {
+        if model.initial_fields().is_empty() {
+            return Ok(InitialState::default());
+        }
+        if let Some(w) = fieldcraft_model::initial::left_out(model, step) {
+            warnings.push(w);
+            return Ok(InitialState::default());
+        }
+        let (temperature, stress) = model.initial_state()?;
+        /// The values at the mesh's nodes (empty when there are none), counting the labels it lacks.
+        fn place<V: Copy>(mesh: &Mesh, values: BTreeMap<u32, V>, missing: &mut usize) -> Vec<Option<V>> {
+            let mut out = Vec::new();
+            for (label, v) in values {
+                let Some(n) = mesh.node(label) else {
+                    *missing += 1;
+                    continue;
+                };
+                if out.is_empty() {
+                    out = vec![None; mesh.labels.len()];
+                }
+                if let Some(slot) = out.get_mut(n) {
+                    *slot = Some(v);
+                }
+            }
+            out
+        }
+        let mut missing = 0usize;
+        let state = InitialState { temperature: place(mesh, temperature, &mut missing), stress: place(mesh, stress, &mut missing) };
+        if missing > 0 {
+            warnings.push(format!(
+                "{missing} initial field values are at nodes the mesh does not have; they are left out (map the fields again after remeshing)"
+            ));
+        }
+        if !state.stress.is_empty() {
+            let stressed = |nodes: &[usize]| nodes.iter().any(|n| state.stress.get(*n).copied().flatten().is_some());
+            if let Some(e) = mesh.elements.iter().find(|e| e.theory.is_some() && stressed(&e.nodes)) {
+                return Err(Error::NotSupported(format!("an initial stress in 2D elements (element {})", e.label)));
+            }
+            if mesh.structural.iter().any(|s| stressed(&s.nodes)) || mesh.trusses.iter().any(|t| stressed(&t.nodes)) {
+                warnings.push("shells, beams and trusses take no initial stress yet; it acts in the solid elements only".into());
+            }
+        }
+        Ok(state)
+    }
+
+    /// Add the equivalent nodal forces of the initial stress.
+    pub fn add_stress_loads(&self, f: &mut [f64], mesh: &Mesh) -> Result<()> {
+        if self.stress.is_empty() {
+            return Ok(());
+        }
+        for e in &mesh.elements {
+            let Some(sigma0) = e.initial_stress(&self.stress) else { continue };
+            let forces = e.kernel()?.initial_stress_load(&e.d, &sigma0).map_err(|err| Error::element(e.label, err))?;
+            for (node, v) in e.nodes.iter().zip(forces) {
+                add(f, &translations(mesh, *node)?, v);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The uniform force per volume a step's gravity and body forces put on each shell and beam

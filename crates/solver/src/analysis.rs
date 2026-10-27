@@ -18,8 +18,8 @@ use crate::ldlt::{Kind, Symmetric};
 use crate::ordering::fill_reducing_order;
 use crate::sparse::{Csr, NodeGraph, add_block, add_diagonal, add_scalar};
 use crate::system::{
-    Mesh, Structural, StructuralKernel, add_thermal_loads, inelastic_warnings, loads, prescribed, structural_body_forces, temperature_loads,
-    translation_block,
+    InitialState, Mesh, Structural, StructuralKernel, add_thermal_loads, inelastic_warnings, loads, prescribed, structural_body_forces,
+    temperature_loads, translation_block,
 };
 use crate::{Error, Limits, Result};
 
@@ -401,6 +401,7 @@ pub(crate) fn static_on(setup: &Setup<'_>, limits: &Limits) -> Result<StaticResu
         }
         _ => (temperature_loads(model, resolved, mesh, step)?, None),
     };
+    let initial = InitialState::new(model, mesh, step, &mut warnings)?;
     if field.is_some() && !mesh.structural.is_empty() {
         warnings.push("shells and beams take no thermal strain yet; the temperatures strain the solid, 2D and truss elements only".into());
     }
@@ -409,8 +410,9 @@ pub(crate) fn static_on(setup: &Setup<'_>, limits: &Limits) -> Result<StaticResu
     let red = reduction(setup, true, &order, budget(limits, mesh, &graph, 1), &mut warnings)?;
     let mut f = loads(model, resolved, mesh, step, &red.active)?;
     if let Some(field) = &field {
-        add_thermal_loads(&mut f, mesh, field)?;
+        add_thermal_loads(&mut f, mesh, field, &initial.temperature)?;
     }
+    initial.add_stress_loads(&mut f, mesh)?;
     let k = assemble(mesh, &graph, None)?.k;
     if red.neq() == 0 {
         return Err(Error::Invalid("every degree of freedom is prescribed; there is nothing to solve".into()));
@@ -450,8 +452,9 @@ pub(crate) fn static_on(setup: &Setup<'_>, limits: &Limits) -> Result<StaticResu
         let Some(e) = mesh.elements.get(i) else { return Err(Error::Internal("element index".into())) };
         let kernel = e.kernel()?;
         let ue: Vec<[f64; 3]> = e.nodes.iter().map(|n| displacement.get(*n).copied().unwrap_or_default()).collect();
-        let thermal = field.as_deref().and_then(|t| e.thermal_strain(t));
-        let points = kernel.stresses_with(&e.d, &ue, thermal.as_ref()).map_err(|err| Error::element(e.label, err))?;
+        let thermal = field.as_deref().and_then(|t| e.thermal_strain(t, &initial.temperature));
+        let sigma0 = e.initial_stress(&initial.stress);
+        let points = kernel.stresses_from(&e.d, &ue, thermal.as_ref(), sigma0.as_deref()).map_err(|err| Error::element(e.label, err))?;
         Ok((points, kernel.ty(), kernel.rule()))
     });
     for (e, computed) in mesh.elements.iter().zip(all_points) {
@@ -481,7 +484,7 @@ pub(crate) fn static_on(setup: &Setup<'_>, limits: &Limits) -> Result<StaticResu
         let truss = t.truss()?;
         let at = |err| Error::element(t.label, err);
         let ue: Vec<[f64; 3]> = t.nodes.iter().map(|n| displacement.get(*n).copied().unwrap_or_default()).collect();
-        let thermal = field.as_deref().and_then(|f| t.thermal_strain(f));
+        let thermal = field.as_deref().and_then(|f| t.thermal_strain(f, &initial.temperature));
         let points = truss.stresses_with(t.young, &ue, thermal.as_ref()).map_err(at)?;
         let nodal = truss.extrapolate(&points.iter().map(|p| p.stress).collect::<Vec<_>>()).map_err(at)?;
         for (n, s) in t.nodes.iter().zip(&nodal) {
@@ -604,6 +607,7 @@ pub fn solve_frequency(model: &Model, step: Option<&str>, options: &FrequencyOpt
     let mesh = Mesh::new(model, &resolved, limits.max_dofs)?;
     let mut warnings: Vec<String> = resolved.warnings.iter().map(ToString::to_string).chain(mesh.warnings.iter().cloned()).collect();
     warnings.extend(inelastic_warnings(model));
+    warnings.extend(fieldcraft_model::initial::left_out(model, step));
     let (graph, order) = pattern(&mesh);
     ignored_dashpots(&mesh, &mut warnings);
     let setup = Setup { model, resolved: &resolved, mesh: &mesh, step };

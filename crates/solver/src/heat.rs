@@ -482,6 +482,7 @@ pub fn solve_heat(model: &Model, step: Option<&str>, limits: &Limits) -> Result<
     let resolved = model.resolve()?;
     let step = model.select_step(step, |p| matches!(p, Procedure::HeatTransfer { .. }), "heat transfer")?;
     let mut warnings: Vec<String> = resolved.warnings.iter().map(ToString::to_string).collect();
+    warnings.extend(fieldcraft_model::initial::left_out(model, step));
     let mut s = run(model, &resolved, step, limits)?;
     warnings.append(&mut s.warnings);
     let t = s.temperature();
