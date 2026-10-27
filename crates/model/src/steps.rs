@@ -1265,9 +1265,14 @@ pub struct StepInputs<'a> {
     springs: &'a BTreeMap<String, crate::Spring>,
     boundary_conditions: BTreeMap<&'a str, &'a crate::BoundaryCondition>,
     loads: BTreeMap<&'a str, &'a crate::Load>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    initial_fields: &'a BTreeMap<String, crate::InitialField>,
     fluid_domains: &'a BTreeMap<String, crate::FluidDomain>,
     step: &'a Step,
 }
+
+/// What a step that takes no initial fields reads of them.
+static NO_FIELDS: BTreeMap<String, crate::InitialField> = BTreeMap::new();
 
 impl Model {
     /// What solving step `name` reads: the mesh, the materials, sections, interactions and every
@@ -1297,6 +1302,7 @@ impl Model {
                 .map(|(n, b)| (n.as_str(), b))
                 .collect(),
             loads: self.loads.iter().filter(|(n, _)| step.loads.contains(*n)).map(|(n, l)| (n.as_str(), l)).collect(),
+            initial_fields: if crate::initial::acts_in(&step.procedure) { &self.initial_fields } else { &NO_FIELDS },
             fluid_domains: &self.fluid_domains,
             step,
         })

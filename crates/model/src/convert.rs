@@ -532,6 +532,7 @@ impl Model {
             springs,
             boundary_conditions,
             loads,
+            initial_fields,
             fluid_domains,
             steps,
             datums,
@@ -565,6 +566,12 @@ impl Model {
         springs.values_mut().for_each(|x| x.quantities(f));
         boundary_conditions.values_mut().for_each(|x| x.quantities(f));
         loads.values_mut().for_each(|x| x.quantities(f));
+        for field in initial_fields.values_mut() {
+            match field {
+                InitialField::Temperature { values, source: _ } => values.values_mut().for_each(|v| f(Q::Temperature, v)),
+                InitialField::Stress { values, source: _ } => values.values_mut().for_each(|v| each(v, Q::Pressure, f)),
+            }
+        }
         fluid_domains.values_mut().for_each(|x| x.quantities(f));
         steps.iter_mut().for_each(|x| x.quantities(f));
         datums.values_mut().for_each(|x| x.quantities(f));
@@ -643,6 +650,7 @@ impl Model {
         keep_map(&self.springs, &c.springs, &b.springs, &mut out.springs);
         keep_map(&self.boundary_conditions, &c.boundary_conditions, &b.boundary_conditions, &mut out.boundary_conditions);
         keep_map(&self.loads, &c.loads, &b.loads, &mut out.loads);
+        keep_map(&self.initial_fields, &c.initial_fields, &b.initial_fields, &mut out.initial_fields);
         keep_map(&self.fluid_domains, &c.fluid_domains, &b.fluid_domains, &mut out.fluid_domains);
         keep_list(&self.steps, &c.steps, &b.steps, &mut out.steps);
         keep_map(&self.datums, &c.datums, &b.datums, &mut out.datums);

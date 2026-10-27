@@ -10,6 +10,8 @@
 //! - materials ([`materials`]), sections with their element
 //!   formulation ([`sections`]), reference points and couplings ([`constraints`]), point masses,
 //!   springs and dashpots ([`discrete`]);
+//! - initial temperature and stress fields at the nodes, mapped from another analysis
+//!   ([`initial`]);
 //! - boundary conditions ([`bcs`]), loads ([`loads`]) and steps with an explicit table of which
 //!   boundary conditions and loads are active in each step ([`steps`]);
 //! - the check that names every missing or bad item, and the resolved view the deck writers and
@@ -42,6 +44,7 @@ pub mod fluid_zones;
 pub mod fluids;
 pub mod geometry;
 pub mod geometry_names;
+pub mod initial;
 pub mod loads;
 pub mod materials;
 mod mesh;
@@ -76,6 +79,7 @@ pub use fluids::{
 };
 pub use geometry::{BodyMesh, Classification, Entity, GeometryRef};
 pub use geometry_names::NameUse;
+pub use initial::InitialField;
 pub use loads::{Distribution, Load, centrifugal_acceleration};
 pub use materials::{Damage, Directional, Elastic, Erosion, Fluid, Hardening, HardeningPoint, Hyperelastic, Material, Plastic, Thermal};
 pub use mesh::{
@@ -167,6 +171,9 @@ pub struct Model {
     springs: BTreeMap<String, Spring>,
     boundary_conditions: BTreeMap<String, BoundaryCondition>,
     loads: BTreeMap<String, Load>,
+    /// Initial temperature and stress fields, by name.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    initial_fields: BTreeMap<String, InitialField>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     fluid_domains: BTreeMap<String, FluidDomain>,
     /// In analysis order.
@@ -242,6 +249,8 @@ struct ModelData {
     boundary_conditions: BTreeMap<String, BoundaryCondition>,
     #[serde(default)]
     loads: BTreeMap<String, Load>,
+    #[serde(default)]
+    initial_fields: BTreeMap<String, InitialField>,
     #[serde(default)]
     fluid_domains: BTreeMap<String, FluidDomain>,
     #[serde(default)]
@@ -334,6 +343,9 @@ impl TryFrom<ModelData> for Model {
         }
         for (n, v) in d.loads {
             m.add_load(&n, v)?;
+        }
+        for (n, v) in d.initial_fields {
+            m.set_initial_field(&n, v)?;
         }
         for (n, v) in d.fluid_domains {
             m.add_fluid_domain(&n, v)?;
@@ -505,6 +517,7 @@ impl Model {
             springs: self.springs.clone(),
             boundary_conditions: self.boundary_conditions.clone(),
             loads: self.loads.clone(),
+            initial_fields: self.initial_fields.clone(),
             fluid_domains: self.fluid_domains.clone(),
             steps: self.steps.clone(),
             datums: self.datums.clone(),
@@ -569,7 +582,7 @@ impl Model {
     }
 
     /// Counts of each kind of definition, for summaries.
-    pub fn definition_counts(&self) -> [(&'static str, usize); 21] {
+    pub fn definition_counts(&self) -> [(&'static str, usize); 22] {
         [
             ("sets", self.sets.len()),
             ("materials", self.materials.len()),
@@ -582,6 +595,7 @@ impl Model {
             ("springs", self.springs.len()),
             ("boundary_conditions", self.boundary_conditions.len()),
             ("loads", self.loads.len()),
+            ("initial_fields", self.initial_fields.len()),
             ("fluid_domains", self.fluid_domains.len()),
             ("steps", self.steps.len()),
             ("datums", self.datums.len()),

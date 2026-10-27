@@ -401,6 +401,20 @@ impl Model {
             }
         }
 
+        // Initial fields: one value per node, at nodes the mesh has.
+        if let Err(e) = self.initial_state() {
+            d.error("initial fields", e.to_string());
+        }
+        for (name, field) in &self.initial_fields {
+            let missing = field.nodes().iter().filter(|n| !self.nodes.contains_key(n)).count();
+            if missing > 0 {
+                d.warning(
+                    format!("initial field `{name}`"),
+                    format!("{missing} of its {} nodes are not in the mesh (map it again after remeshing)", field.len()),
+                );
+            }
+        }
+
         // Reference points and couplings.
         resolved.reference_point_nodes = self.reference_point_nodes();
         for (name, label) in &resolved.reference_point_nodes {
