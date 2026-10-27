@@ -46,6 +46,8 @@
 //!   Johnson–Cook damage;
 //! - [`truss`]: two- and three-node trusses (straight or curved), their stiffness, mass, body
 //!   force and axial stress;
+//! - [`transfer`]: locating points in a mesh's solid elements and interpolating nodal fields
+//!   between non-matching meshes;
 //! - [`dense`]: the small dense linear algebra inside an element.
 //!
 //! Conventions: element matrices are ordered node by node, each node's degrees of freedom in
@@ -79,6 +81,7 @@ pub mod quadrature;
 pub mod rotation;
 pub mod shape;
 pub mod shell;
+pub mod transfer;
 pub mod truss;
 pub mod uniform;
 
