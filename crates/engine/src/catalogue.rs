@@ -539,8 +539,8 @@ pub static CATALOGUE: &[Capability] = &[
         "Load",
         Loads,
         "Loads",
-        "Force, moment, pressure, traction, gravity or body force",
-        &["model.load.edit", "model.load.delete"],
+        "Force, moment, pressure, traction, gravity or body force; initial temperature and residual stress mapped from another analysis",
+        &["model.load.edit", "model.load.delete", "model.initial_field.map", "model.initial_field.delete"],
     ),
     ready_more(
         "model.fluid_domain.create",

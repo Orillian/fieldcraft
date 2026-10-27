@@ -14,6 +14,7 @@ pub(crate) mod file;
 pub(crate) mod forms;
 mod geometry;
 mod hex;
+mod initial;
 pub(crate) mod mesh;
 
 pub use datum::edit_params as datum_edit_params;
@@ -183,6 +184,8 @@ pub static ALL: &[CommandSpec] = &[
     define::LOAD_CREATE,
     define::LOAD_EDIT,
     define::LOAD_DELETE,
+    initial::MAP,
+    initial::DELETE,
     define::FLUID_DOMAIN_CREATE,
     define::FLUID_DOMAIN_EDIT,
     define::FLUID_DOMAIN_DELETE,

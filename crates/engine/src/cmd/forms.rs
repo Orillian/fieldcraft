@@ -2522,6 +2522,25 @@ pub const EXPORT_VTU: &[Field] = &[
         .help("Text is readable; binary is smaller and exact.")
         .def("\"ascii\""),
 ];
+pub const INITIAL_FIELD_MAP: &[Field] = &[
+    NAME,
+    choice("quantity", "Quantity", &[("temperature", "Temperature"), ("stress", "Stress")])
+        .help("Map a temperature (where thermal strains are measured from) or a residual stress.")
+        .req(),
+    text("step", "Source step")
+        .help("The solved step to map from: a heat transfer or coupled step's temperatures, or a static step's stresses.")
+        .req(),
+    path("file", "Source model", false)
+        .help("The .fieldcraft model holding the step and its saved results, on its own mesh; this model when empty.")
+        .hint("this model"),
+    int("frame", "Frame", 0, 1_000_000_000).help("Heat transfer steps: the frame to map; the last when empty.").hint("the last"),
+    reference("set", "Target set", C::Set).help("The nodes to map onto; every node of a solid element when empty.").hint("every solid node"),
+    positive("tolerance", "Tolerance", D::Length)
+        .help("How far outside the source mesh a node may lie and still take the value at the closest point.")
+        .hint("a quarter of the source's element size"),
+];
+pub const INITIAL_FIELD_DELETE: &[Field] = &[text("name", "Initial field").req().help("The initial field to remove, by name.")];
+
 pub const REACTIONS: &[Field] = &[
     SOLVED,
     references("sets", "Sets", C::Set)

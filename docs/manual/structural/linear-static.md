@@ -68,6 +68,30 @@ In a 2D model loads lie in the XY plane: surface loads act on element edges, for
 over the thickness (or the circumference, axisymmetric), and a vector with a Z component is an
 error. Heat loads (`surface_flux`, `convection`, `heat_source`) have no effect in a static step.
 
+### Initial fields
+
+A model can carry named initial fields: a temperature or a stress (xx, yy, zz, xy, xz, yz) per
+node label, usually mapped from another analysis (a moulding, casting or thermal simulation, or
+another mesh of the part) to solve the warpage and stress after ejection. Static and coupled
+temperature–displacement steps start from them; other procedures leave them out with a warning.
+
+- An initial **temperature** T₀ is where thermal strain is measured from, ε_th = α (T − T₀)
+  (nodes without one start at the material's reference temperature), so a part cooled to a
+  uniform temperature warps by its own temperature field.
+- An initial **stress** σ₀ adds to the stress, σ = D (ε − ε_th) + σ₀, and loads the solid elements
+  with −∫ Bᵀ σ₀ dV (`Solid::initial_stress_load`): whatever part of it the supports do not hold is
+  released into deformation; a self-equilibrated σ₀ held by the supports moves nothing.
+
+`model.initial_field.map` fills a field from a solved step (a heat transfer step's frame or a
+coupled step's temperatures, a static step's stresses) of this model or of another `.fieldcraft`
+file on another mesh. `fieldcraft_fem::transfer::Locator` finds the source's solid element
+holding each target node by a bucket grid and Newton's method on the isoparametric map, and
+interpolates by that element's shape functions (consistent interpolation; de Boer, van Zuijlen &
+Bijl 2007), which reproduces uniform and linear fields exactly on any two meshes. A node outside
+the source by at most the tolerance (a quarter of the source's mean element size by default)
+takes the value at the closest point; nodes farther out get none and are counted in the reply.
+`model.initial_field.delete` removes a field.
+
 ## Theory
 
 The principle of virtual work with the isoparametric elements of the [Element
@@ -237,6 +261,9 @@ probe at the foot's end lies within 0.13 % of the fine tet10 solution.
 | Inclined symmetry plane against the axis-aligned image and the whole part | theory (frame indifference) | displacements < 10⁻⁹, stresses < 10⁻⁸; balance < 10⁻⁸ | as stated | `crates/solver/tests/inclined_symmetry.rs` |
 | Filleted bracket, peak fillet stress (mesh-converged reference) | theory (convergence study) | within 3 % (fine), 5 % (coarse); reaction exact | 3 %, 5 % | `filleted-bracket-fillet-stress`, `-coarse` |
 | A buckling preload equals the static solution, 1 and 3 threads | determinism | bit for bit | exact | `buckling_preloads_match_static_with_loads_motion_and_temperature` |
+| Field transfer of uniform and linear fields, tet4, tet10, wedge6, pyramid5, hex8, hex20 | theory | < 10⁻¹² | exact | `crates/fem/src/transfer.rs` tests |
+| Initial stress held by the supports; linear residual stress and linear initial temperature released in a free beam (w″ = 2 s / (E H), w″ = α g) | theory (Timoshenko & Goodier §150) | < 10⁻⁸ | 10⁻⁸ | `crates/solver/tests/initial.rs` |
+| Linear temperature and uniform stress mapped from hex20 onto tet10 of other divisions, then held | theory | 10⁻⁹ K, 10⁻⁷ rel.; solved stress 10⁻⁶ rel. | as stated | `cmd::initial::tests` |
 | Errors and caps | singular model names a node; `max_dofs`, `max_factor_entries` refuse with the byte estimate | — | — | `errors_name_the_problem` |
 
 ## Limitations
@@ -250,6 +277,19 @@ probe at the foot's end lies within 0.13 % of the fine tet10 solution.
 - Dashpots are ignored with a warning.
 - A rotation boundary condition on a solid node has no effect (solid nodes have no rotations).
 - Couplings are refused in 2D models.
+- Initial fields: mapped from static, heat transfer and coupled steps only, onto and from solid
+  elements only (an initial stress in 2D or hybrid elements is refused, shells, beams and
+  trusses leave it out with a warning); they are keyed by node label, so a remeshed part needs
+  them mapped again. The deck writers refuse them by name.
+- tet10 integrates the initial-stress load −∫ Bᵀ σ₀ dV only approximately once σ₀ varies
+  more than linearly across an element: its four-point rule is exact to degree 2, and the
+  integrand is cubic for a quadratic σ₀. A self-equilibrated σ₀ then gives a spurious load. In
+  `crates/solver/tests/initial.rs`, σ_xx = s (1 − 12 ζ²) through a beam held at its ends (the
+  exact solution moves nothing) moves a tet10 mesh of 8 × 2 × 2 cells by 3·10⁻³ of s L / E and
+  changes the stress by 0.7 % of s (the reactions still balance), where hex8 and hex20, whose
+  product rules integrate this load exactly on undistorted elements, give zero to rounding.
+  The error falls with the mesh size (16 × 4 × 4 cells: 2.3·10⁻⁴ and 0.18 %); where a residual
+  stress varies sharply, use hex20 or a finer tet10 mesh.
 
 ## Implementation
 
