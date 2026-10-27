@@ -252,3 +252,48 @@ fn uniform_thermal_strain_is_free_expansion_and_its_load_balances_it() {
         assert!(solid.thermal_load(&d, &crate::ThermalStrain { alpha: [f64::NAN; 3], delta: vec![1.0; xyz.len()] }).is_err());
     }
 }
+
+#[test]
+fn a_uniform_initial_stress_is_released_by_the_matching_uniform_strain() {
+    // σ₀ = −D ε*: the uniform strain ε* (u = E* x) releases it entirely, so the stress
+    // D ε + σ₀ is zero there, and the initial-stress load −∫ Bᵀ σ₀ dV equals K u for it.
+    let d = orthotropic([1000.0, 800.0, 600.0], [0.3, 0.25, 0.2], [400.0, 300.0, 350.0]).unwrap();
+    let strain = [2e-3, -1e-3, 0.5e-3, 1.5e-3, -0.8e-3, 0.4e-3];
+    let initial = stress(&d, &strain).map(|s| -s);
+    for (kind, f) in CASES {
+        let xyz = distorted(kind, true);
+        let solid = Solid::new(kind, &xyz, f).unwrap();
+        let sigma0 = vec![initial; xyz.len()];
+        if matches!(f, Formulation::Hybrid { .. }) {
+            assert!(solid.initial_stress_load(&d, &sigma0).is_err());
+            continue;
+        }
+        let [exx, eyy, ezz, gxy, gxz, gyz] = strain;
+        let u: Vec<[f64; 3]> = xyz
+            .iter()
+            .map(|x| {
+                [
+                    exx * x[0] + gxy / 2.0 * x[1] + gxz / 2.0 * x[2],
+                    gxy / 2.0 * x[0] + eyy * x[1] + gyz / 2.0 * x[2],
+                    gxz / 2.0 * x[0] + gyz / 2.0 * x[1] + ezz * x[2],
+                ]
+            })
+            .collect();
+        for p in solid.stresses_from(&d, &u, None, Some(&sigma0)).unwrap() {
+            assert!(p.stress.iter().all(|s| s.abs() < 1e-9), "{kind:?} {f:?}: {:?}", p.stress);
+        }
+        // At rest the stress is the initial stress.
+        for p in solid.stresses_from(&d, &vec![[0.0; 3]; xyz.len()], None, Some(&sigma0)).unwrap() {
+            assert!(p.stress.iter().zip(&initial).all(|(a, b)| (a - b).abs() < 1e-12), "{kind:?} {f:?}: {:?}", p.stress);
+        }
+        let load = solid.initial_stress_load(&d, &sigma0).unwrap();
+        let ku = solid.stiffness(&d).unwrap().mul_vec(&u.iter().flatten().copied().collect::<Vec<_>>());
+        let scale = ku.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for (a, b) in load.iter().flatten().zip(&ku) {
+            assert!((a - b).abs() < 1e-9 * scale, "{kind:?} {f:?}: {a} vs {b}");
+        }
+        assert_eq!(solid.stresses_from(&d, &u, None, None).unwrap(), solid.stresses(&d, &u).unwrap());
+        assert!(solid.initial_stress_load(&d, &sigma0[1..]).is_err());
+        assert!(solid.initial_stress_load(&d, &vec![[f64::NAN; 6]; xyz.len()]).is_err());
+    }
+}

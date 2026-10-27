@@ -491,25 +491,27 @@ impl<'a> Solid<'a> {
         if let Formulation::Hybrid { .. } = self.formulation {
             return self.hybrid_thermal_load(d, thermal);
         }
-        if self.formulation == Formulation::IncompatibleModes {
-            let IncompatibleParts { kua, kaa, j0, .. } = self.incompatible_parts(d, false)?;
-            let (mut f, mut fa) = self.thermal_forces(d, thermal, Some(&j0))?;
-            Cholesky::new(&kaa)?.solve(&mut fa);
-            for (i, fi) in f.iter_mut().flatten().enumerate() {
-                *fi -= (0..INCOMPATIBLE_DOFS).map(|a| kua.get(i * INCOMPATIBLE_DOFS + a).copied().unwrap_or(0.0) * fa[a]).sum::<f64>();
-            }
-            return Ok(f);
-        }
-        Ok(self.thermal_forces(d, thermal, None)?.0)
+        self.eigen_load(d, |n| stress(d, &Self::thermal_strain(thermal, n)))
     }
 
-    /// ∫ Bᵀ D ε_th dV on the nodes and, with the centre Jacobian `j0`, on the incompatible modes.
-    fn thermal_forces(
-        &self,
-        d: &Elasticity,
-        thermal: &ThermalStrain,
-        j0: Option<&([[f64; 3]; 3], f64)>,
-    ) -> Result<(Vec<[f64; 3]>, [f64; INCOMPATIBLE_DOFS])> {
+    /// ∫ Bᵀ σ* dV with the stiffness rule for a stress σ*(N) given by the shape values, with
+    /// incompatible modes condensed out as in the stiffness, f = f_u − K_ua K_aa⁻¹ f_a.
+    fn eigen_load(&self, d: &Elasticity, sig: impl Fn(&[f64]) -> [f64; 6]) -> Result<Vec<[f64; 3]>> {
+        if self.formulation != Formulation::IncompatibleModes {
+            return Ok(self.eigen_forces(None, sig)?.0);
+        }
+        let IncompatibleParts { kua, kaa, j0, .. } = self.incompatible_parts(d, false)?;
+        let (mut f, mut fa) = self.eigen_forces(Some(&j0), sig)?;
+        Cholesky::new(&kaa)?.solve(&mut fa);
+        for (i, fi) in f.iter_mut().flatten().enumerate() {
+            *fi -= (0..INCOMPATIBLE_DOFS).map(|a| kua.get(i * INCOMPATIBLE_DOFS + a).copied().unwrap_or(0.0) * fa[a]).sum::<f64>();
+        }
+        Ok(f)
+    }
+
+    /// ∫ Bᵀ σ* dV on the nodes and, with the centre Jacobian `j0`, on the incompatible modes, for
+    /// a stress σ*(N) given at each stiffness point by its shape values.
+    fn eigen_forces(&self, j0: Option<&([[f64; 3]; 3], f64)>, sig: impl Fn(&[f64]) -> [f64; 6]) -> Result<(Vec<[f64; 3]>, [f64; INCOMPATIBLE_DOFS])> {
         let mut f = vec![[0.0; 3]; self.ty.nodes];
         let mut fa = [0.0; INCOMPATIBLE_DOFS];
         let add = |out: &mut [f64], g: &[f64; 3], sig: &[f64; 6], w: f64| {
@@ -521,7 +523,7 @@ impl<'a> Solid<'a> {
         for p in self.rule().points() {
             let g = self.gradients(p.xi)?;
             let w = g.det * p.weight;
-            let sig = stress(d, &Self::thermal_strain(thermal, g.shape.values()));
+            let sig = sig(g.shape.values());
             for (fi, gi) in f.iter_mut().zip(g.dx.get(..self.ty.nodes).unwrap_or_default()) {
                 add(fi, gi, &sig, w);
             }
@@ -534,6 +536,41 @@ impl<'a> Solid<'a> {
         Ok((f, fa))
     }
 
+    /// The initial stress σ₀ = Σ Nᵢ σ₀ᵢ at a point with shape values `n`, from its nodal values.
+    pub(crate) fn initial_stress_at(initial: &[[f64; 6]], n: &[f64]) -> [f64; 6] {
+        let mut s = [0.0; 6];
+        for (ni, si) in n.iter().zip(initial) {
+            for k in 0..6 {
+                s[k] += ni * si[k];
+            }
+        }
+        s
+    }
+
+    /// Check nodal initial stresses: one finite stress per node.
+    fn check_initial(&self, initial: &[[f64; 6]]) -> Result<()> {
+        if initial.len() != self.ty.nodes {
+            return Err(Error::Invalid(format!("{} initial stresses for a {}-node element", initial.len(), self.ty.nodes)));
+        }
+        if initial.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(Error::Invalid("initial stresses must be finite".into()));
+        }
+        if let Formulation::Hybrid { .. } = self.formulation {
+            return Err(Error::NotSupported("an initial stress in hybrid elements".into()));
+        }
+        Ok(())
+    }
+
+    /// The equivalent nodal forces of an initial stress σ₀ given at the nodes (interpolated by
+    /// the shape functions), −∫ Bᵀ σ₀ dV with the stiffness rule: the initial-stress load of
+    /// Zienkiewicz, Taylor & Zhu 2013, §6.2.3, so that K u = f − ∫ Bᵀ σ₀ dV and the stress is
+    /// σ = D (ε − ε_th) + σ₀. A self-equilibrated σ₀ (∇·σ₀ = 0, no traction on a free surface)
+    /// gives no load. Incompatible modes are condensed out as in [`Self::thermal_load`].
+    pub fn initial_stress_load(&self, d: &Elasticity, initial: &[[f64; 6]]) -> Result<Vec<[f64; 3]>> {
+        self.check_initial(initial)?;
+        self.eigen_load(d, |n| Self::initial_stress_at(initial, n).map(|v| -v))
+    }
+
     /// Strain and stress at every integration point for the nodal displacements `u`.
     pub fn stresses(&self, d: &Elasticity, u: &[[f64; 3]]) -> Result<Vec<PointStress>> {
         self.stresses_with(d, u, None)
@@ -542,6 +579,21 @@ impl<'a> Solid<'a> {
     /// Strain and stress at every integration point for the nodal displacements `u` and, if
     /// given, a thermal strain: the stress is D (ε − ε_th), the strain reported the total ε.
     pub fn stresses_with(&self, d: &Elasticity, u: &[[f64; 3]], thermal: Option<&ThermalStrain>) -> Result<Vec<PointStress>> {
+        self.stresses_from(d, u, thermal, None)
+    }
+
+    /// As [`Self::stresses_with`], from an initial stress σ₀ given at the nodes when there is
+    /// one: the stress is D (ε − ε_th) + σ₀ (the strain is still the one since the start).
+    pub fn stresses_from(
+        &self,
+        d: &Elasticity,
+        u: &[[f64; 3]],
+        thermal: Option<&ThermalStrain>,
+        initial: Option<&[[f64; 6]]>,
+    ) -> Result<Vec<PointStress>> {
+        if let Some(i) = initial {
+            self.check_initial(i)?;
+        }
         if u.len() != self.ty.nodes {
             return Err(Error::Invalid(format!("{} displacements for a {}-node element", u.len(), self.ty.nodes)));
         }
@@ -555,9 +607,16 @@ impl<'a> Solid<'a> {
         let alpha = if self.formulation == Formulation::IncompatibleModes {
             let IncompatibleParts { kua, kaa, j0, .. } = self.incompatible_parts(d, false)?;
             let flat: Vec<f64> = u.iter().flatten().copied().collect();
-            let mut rhs = match thermal {
-                Some(t) => self.thermal_forces(d, t, Some(&j0))?.1,
-                None => [0.0; INCOMPATIBLE_DOFS],
+            let mut rhs = match (thermal, initial) {
+                (None, None) => [0.0; INCOMPATIBLE_DOFS],
+                _ => {
+                    self.eigen_forces(Some(&j0), |n| {
+                        let th = thermal.map_or([0.0; 6], |t| stress(d, &Self::thermal_strain(t, n)));
+                        let s0 = initial.map_or([0.0; 6], |i| Self::initial_stress_at(i, n));
+                        [0, 1, 2, 3, 4, 5].map(|k| th[k] - s0[k])
+                    })?
+                    .1
+                }
             };
             for (i, ui) in flat.iter().enumerate() {
                 for (a, r) in rhs.iter_mut().enumerate() {
@@ -600,10 +659,16 @@ impl<'a> Solid<'a> {
                 }
                 None => strain,
             };
-            let sigma = match &hybrid {
+            let mut sigma = match &hybrid {
                 Some(h) => h.stress(&mechanical, xyz),
                 None => stress(d, &mechanical),
             };
+            if let Some(i) = initial {
+                let s0 = Self::initial_stress_at(i, g.shape.values());
+                for k in 0..6 {
+                    sigma[k] += s0[k];
+                }
+            }
             out.push(PointStress { xyz, strain, stress: sigma });
         }
         Ok(out)
