@@ -143,8 +143,8 @@ pub(crate) fn unsupported(format: &'static str, items: BTreeSet<String>) -> Resu
 }
 
 /// Heat transfer in a model, which no writer expresses yet: heat transfer and coupled
-/// temperature–displacement steps, temperature boundary conditions, heat loads and temperature
-/// fields. Thermal material properties alone are left out of the decks (nothing uses them).
+/// temperature–displacement steps, temperature boundary conditions, heat loads, temperature
+/// fields and initial (temperature or stress) fields. Thermal material properties alone are left out of the decks (nothing uses them).
 pub(crate) fn thermal_items(model: &Model) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for step in model.steps().iter().filter(|s| s.procedure.is_thermal()) {
@@ -155,6 +155,9 @@ pub(crate) fn thermal_items(model: &Model) -> BTreeSet<String> {
     }
     for (name, load) in model.loads().iter().filter(|(_, l)| l.is_thermal() || matches!(l, Load::Temperature { .. })) {
         out.insert(format!("load `{name}`: {} loads (not written to decks yet)", load.kind()));
+    }
+    for (name, field) in model.initial_fields() {
+        out.insert(format!("initial field `{name}`: initial {} fields (not written to decks yet)", field.kind()));
     }
     out
 }
