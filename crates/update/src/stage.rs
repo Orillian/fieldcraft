@@ -265,8 +265,7 @@ fn codesign_verify(path: &Path) -> Result<()> {
 fn check_mac_app(app: &Path, installed: &Path) -> Result<()> {
     codesign_verify(app)?;
     let info = run("codesign", &["-d".as_ref(), "--verbose=2".as_ref(), app.as_os_str()])?;
-    let text = String::from_utf8_lossy(&info.stderr);
-    if !text.lines().any(|l| l.trim() == format!("Identifier={}", crate::install::BUNDLE_ID)) {
+    if !is_fieldcraft(&String::from_utf8_lossy(&info.stderr)) {
         return Err(Error::Verify(format!("the downloaded app is not {}", crate::install::BUNDLE_ID)));
     }
     let gatekeeper = |p: &Path| run("spctl", &["--assess".as_ref(), "--type".as_ref(), "execute".as_ref(), p.as_os_str()]);
@@ -274,6 +273,12 @@ fn check_mac_app(app: &Path, installed: &Path) -> Result<()> {
         gatekeeper(app).map_err(|e| Error::Verify(format!("Gatekeeper does not accept the downloaded app: {e}")))?;
     }
     Ok(())
+}
+
+/// Whether `codesign -d --verbose=2` output names one of FieldCraft's bundle identifiers
+/// ([`crate::install::ACCEPTED_BUNDLE_IDS`]).
+fn is_fieldcraft(codesign: &str) -> bool {
+    codesign.lines().filter_map(|l| l.trim().strip_prefix("Identifier=")).any(|id| crate::install::ACCEPTED_BUNDLE_IDS.contains(&id))
 }
 
 /// Swap the staged release in: each item moves to its backup and the new one into its place; a
@@ -416,6 +421,18 @@ mod tests {
 
     /// A tar.gz install is staged beside itself, verified, and swapped in by renames; the
     /// staging folder goes.
+    /// The current bundle id and the one up to 0.7.x are FieldCraft; any other app is not.
+    #[test]
+    fn a_staged_app_must_carry_a_fieldcraft_bundle_id() {
+        let output = |id: &str| format!("Executable=/x/FieldCraft.app/Contents/MacOS/FieldCraft\nIdentifier={id}\nFormat=app bundle\n");
+        assert!(is_fieldcraft(&output("io.github.tangencylabs.fieldcraft")));
+        assert!(is_fieldcraft(&output("io.github.jyviko.fieldcraft")));
+        for other in ["io.github.tangency_labs.fieldcraft", "com.example.fieldcraft", "io.github.tangencylabs.fieldcraft.cli", ""] {
+            assert!(!is_fieldcraft(&output(other)), "{other}");
+        }
+        assert!(!is_fieldcraft("Executable=/x/FieldCraft.app\nTeamIdentifier=io.github.tangencylabs.fieldcraft\n"));
+    }
+
     #[test]
     fn a_verified_folder_release_is_staged_and_swapped_in() {
         let t = Temp::new("tar");

@@ -30,7 +30,7 @@ const CUSTOM_TITLEBAR: bool = !cfg!(target_os = "macos");
 const MSAA: u16 = 4;
 /// The reverse-DNS application id: the Wayland app_id / X11 class, matched to the packaged
 /// `.desktop` entry (packaging/linux), and the macOS bundle id (packaging/macos/Info.plist.in).
-const APP_ID: &str = "io.github.jyviko.fieldcraft";
+const APP_ID: &str = "io.github.tangencylabs.fieldcraft";
 
 /// The window and Dock icon: the 256 px export of the application icon (assets/app-icon).
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/icon.iconset/icon_128x128@2x.png");

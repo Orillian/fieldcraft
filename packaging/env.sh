@@ -10,6 +10,7 @@
 #   CARGO_TARGET_DIR        cargo's target dir (default: $ROOT/target)
 #   APP_ID                  the reverse-DNS id: macOS bundle id, Linux .desktop and icon name, and
 #                           the window's Wayland app_id / X11 class (apps/fieldcraft/src/main.rs)
+#   FLATHUB                 Flathub's .flatpakrepo (the freedesktop runtime of the Flatpak)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export ROOT
@@ -37,8 +38,10 @@ export DIST
 FIELDCRAFT_BUILD_SHA="${FIELDCRAFT_BUILD_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
 export FIELDCRAFT_BUILD_SHA
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-APP_ID=io.github.jyviko.fieldcraft
+APP_ID=io.github.tangencylabs.fieldcraft
 export APP_ID
+FLATHUB=https://dl.flathub.org/repo/flathub.flatpakrepo
+export FLATHUB
 
 # Emit a GitHub Actions warning (plain stderr outside Actions).
 warn() {
@@ -55,4 +58,25 @@ copy_docs() {
   for f in "${DOC_FILES[@]}"; do
     cp "$ROOT/$f" "$dest/"
   done
+}
+
+# Install the Linux desktop entry, the hicolor icons and the docs under a share/ folder (the
+# tar.gz, AppImage, .deb and .rpm by packaging/linux/package.sh; the Flatpak's /app/share).
+install_share() {
+  local share="$1" size file
+  install -Dm644 "$ROOT/packaging/linux/$APP_ID.desktop" "$share/applications/$APP_ID.desktop"
+  # hicolor icons: <size> <the iconset export of that size>.
+  while read -r size file; do
+    install -Dm644 "$ROOT/assets/app-icon/icon.iconset/$file" "$share/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
+  done <<'ICONS'
+16 icon_16x16.png
+32 icon_32x32.png
+64 icon_32x32@2x.png
+128 icon_128x128.png
+256 icon_256x256.png
+512 icon_512x512.png
+1024 icon_512x512@2x.png
+ICONS
+  mkdir -p "$share/doc/fieldcraft"
+  copy_docs "$share/doc/fieldcraft"
 }

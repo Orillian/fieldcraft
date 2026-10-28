@@ -64,21 +64,7 @@ rm -rf "$WORK"
 # ---- an FHS tree, shared by both formats --------------------------------------------------------
 install -Dm755 "$BIN/fieldcraft" "$STAGE/bin/fieldcraft"
 install -Dm755 "$BIN/fieldcraft-cli" "$STAGE/bin/fieldcraft-cli"
-install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/share/applications/$APP_ID.desktop"
-# hicolor icons: <size> <the iconset export of that size>.
-while read -r size file; do
-  install -Dm644 "$ICONSET/$file" "$STAGE/share/icons/hicolor/${size}x${size}/apps/$APP_ID.png"
-done <<'ICONS'
-16 icon_16x16.png
-32 icon_32x32.png
-64 icon_32x32@2x.png
-128 icon_128x128.png
-256 icon_256x256.png
-512 icon_512x512.png
-1024 icon_512x512@2x.png
-ICONS
-mkdir -p "$STAGE/share/doc/fieldcraft"
-copy_docs "$STAGE/share/doc/fieldcraft"
+install_share "$STAGE/share"
 if command -v desktop-file-validate >/dev/null; then
   desktop-file-validate "$STAGE/share/applications/$APP_ID.desktop"
 fi

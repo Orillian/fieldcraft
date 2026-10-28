@@ -21,7 +21,12 @@ use std::path::{Path, PathBuf};
 use crate::{Error, Result, Version};
 
 /// The macOS app's bundle identifier (packaging/macos/Info.plist.in).
-pub const BUNDLE_ID: &str = "io.github.jyviko.fieldcraft";
+pub const BUNDLE_ID: &str = "io.github.tangencylabs.fieldcraft";
+/// The bundle identifiers a downloaded macOS app may carry and still be FieldCraft: [`BUNDLE_ID`]
+/// and the one FieldCraft was signed with up to 0.7.x. A 0.7.x app accepts only its own, so it
+/// refuses a release with [`BUNDLE_ID`]: those installs download one release by hand
+/// (docs/releasing.md).
+pub const ACCEPTED_BUNDLE_IDS: [&str; 2] = [BUNDLE_ID, "io.github.jyviko.fieldcraft"];
 /// The prefix of a staging folder, beside what it replaces (`.fieldcraft-update-0.5.9`).
 pub const STAGE_PREFIX: &str = ".fieldcraft-update-";
 

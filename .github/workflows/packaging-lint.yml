@@ -1,5 +1,6 @@
 # Quick static checks for the release pipeline (seconds, no Rust build): workflow syntax, the
-# packaging shell and PowerShell scripts, the macOS property lists and the Linux desktop entry.
+# packaging shell and PowerShell scripts, the macOS property lists, the Linux desktop entry, the
+# AppStream metainfo and the Flatpak manifest.
 # These files are otherwise exercised only by a full release run (release.yml).
 # Adapted from SolidCraft's packaging-lint.yml, itself adapted from PhotoCraft's (see ATTRIBUTION.md).
 name: Packaging lint
@@ -38,7 +39,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck desktop-file-utils libxml2-utils
+          sudo apt-get install -y --no-install-recommends shellcheck desktop-file-utils libxml2-utils appstream
           archive="$RUNNER_TEMP/actionlint.tar.gz"
           curl -fsSL -o "$archive" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
@@ -82,3 +83,11 @@ jobs:
           # The window's X11 class / Wayland app_id is packaging's APP_ID (apps/fieldcraft/src/main.rs).
           grep -qx "StartupWMClass=$app_id" "$desktop"
           grep -qF "const APP_ID: &str = \"$app_id\";" apps/fieldcraft/src/main.rs
+      - name: AppStream metainfo and Flatpak manifest
+        run: |
+          app_id="$(sed -n 's/^APP_ID=//p' packaging/env.sh)"
+          # The version and date are filled in by the Flatpak build (packaging/linux/flatpak/).
+          metainfo="$RUNNER_TEMP/$app_id.metainfo.xml"
+          sed 's/@VERSION@/0.0.0/g; s/@DATE@/2026-01-01/g' "packaging/linux/$app_id.metainfo.xml" >"$metainfo"
+          appstreamcli validate --no-net --strict "$metainfo"
+          grep -qx "id: $app_id" "packaging/linux/flatpak/$app_id.yml"

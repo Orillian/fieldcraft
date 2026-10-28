@@ -1,0 +1,54 @@
+# Flatpak manifest: FieldCraft built from source on the freedesktop runtime, offline. Build it
+# with packaging/linux/flatpak-bundle.sh, which stages the source tree into `source/`: the
+# committed files (`git archive`), every crate `cargo vendor` fetched (vendor/, with the
+# .cargo/config.toml that points cargo at it), THIRD-PARTY-LICENSES.txt and
+# flatpak-build-env.sh (the version, release date, commit and, in release builds, the analytics
+# key; it is read by the build and not installed). flatpak-builder runs no network during the
+# build. The release attaches the result as fieldcraft-<version>-linux-x86_64.flatpak and the
+# Flatpak repository on Pages imports it (docs/releasing.md, "Flatpak repository").
+# After SolidCraft's packaging/linux/flatpak manifest (MIT OR Apache-2.0; see ATTRIBUTION.md).
+id: io.github.tangencylabs.fieldcraft
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: fieldcraft
+finish-args:
+  # Display: Wayland first; X11 only when no Wayland compositor is running.
+  - --socket=wayland
+  - --socket=fallback-x11
+  # X11 shared memory (MIT-SHM). Without it the X11 fallback is slow or fails.
+  - --share=ipc
+  # GPU access for the wgpu viewport and the GPU solvers (Vulkan, or GL as a fallback); the
+  # driver comes from the runtime's org.freedesktop.Platform.GL extension.
+  - --device=dri
+  # The update check, the opt-in usage analytics (docs/privacy.md) and the --control channel on
+  # 127.0.0.1 (docs/control-protocol.md).
+  - --share=network
+  # Open and Save dialogs go through the file-chooser portal (rfd), so picked files work anywhere
+  # without broad filesystem access. Documents is granted so models passed by path (the command
+  # line, recent files) work in the usual place.
+  - --filesystem=xdg-documents
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/fieldcraft/cargo-home
+    CARGO_NET_OFFLINE: 'true'
+  # The release profile keeps line tables for crash reports; the shipped binaries are stripped,
+  # as in the other Linux packages, and no Debug extension is made.
+  strip: true
+  no-debuginfo: true
+modules:
+  - name: fieldcraft
+    buildsystem: simple
+    build-commands:
+      - . ./flatpak-build-env.sh && cargo build --release --offline --locked -p fieldcraft -p fieldcraft-cli
+      - install -Dm755 -t /app/bin target/release/fieldcraft target/release/fieldcraft-cli
+      - . ./flatpak-build-env.sh && sed "s/@VERSION@/$FIELDCRAFT_VERSION/g; s/@DATE@/$FIELDCRAFT_RELEASE_DATE/g"
+        "packaging/linux/$FLATPAK_ID.metainfo.xml" | install -Dm644 /dev/stdin "/app/share/metainfo/$FLATPAK_ID.metainfo.xml"
+      # The desktop entry, icons and docs, as in the other Linux packages.
+      - bash -c '. packaging/env.sh && install_share /app/share'
+    sources:
+      - type: dir
+        path: source

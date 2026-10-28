@@ -37,8 +37,8 @@ Every release carries `SHA256SUMS.txt` and, signed with the FieldCraft release k
 1. downloads the list and its signature, and refuses unless the signature is the release key's;
 2. downloads the asset for this install and refuses unless its SHA-256 is the one the list gives;
 3. on macOS, refuses an app that fails `codesign --verify --deep --strict`, is not
-   `io.github.jyviko.fieldcraft`, or is rejected by Gatekeeper (`spctl`) when the installed app
-   is accepted.
+   FieldCraft (`io.github.tangencylabs.fieldcraft`, or `io.github.jyviko.fieldcraft` up to 0.7.x),
+   or is rejected by Gatekeeper (`spctl`) when the installed app is accepted.
 
 A release without a signature cannot be installed from the app: Install opens its page instead.
 A development build (run from `target/`) checks but never installs.

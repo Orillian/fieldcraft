@@ -21,11 +21,18 @@ generated list of changes. Every package carries `README.md`, `LICENSE-MIT`, `LI
 which fails when a shipped crate names no licence and carries no licence file, and the release
 attaches the file on its own too. Which licences a dependency may have is `[licenses]` in
 `deny.toml`, which CI checks on every pull request (`cargo deny check licenses`).
-The application id is `io.github.jyviko.fieldcraft`: the macOS bundle id, the Linux `.desktop`
-entry and icon name, and the window's Wayland app_id / X11 class. The icons come from
+The application id is `io.github.tangencylabs.fieldcraft`: the macOS bundle id, the Linux
+`.desktop` entry and icon name, and the window's Wayland app_id / X11 class. The icons come from
 `assets/app-icon`: `icon.icns` and `Assets.car` (macOS 26 and later) in the app bundle,
 `icon.ico` embedded in `fieldcraft.exe` (`apps/fieldcraft/build.rs`), the iconset PNGs as the
 Linux hicolor icons.
+
+Up to 0.7.x the id was `io.github.jyviko.fieldcraft`. An installed 0.7.x macOS app updates only
+to an app signed with that id, so it refuses the first release with the new one: **that
+release's notes must tell macOS users to download the dmg once by hand**; from there the app
+updates itself again. The updater accepts both ids (`ACCEPTED_BUNDLE_IDS` in
+`crates/update/src/install.rs`). On Linux a `.deb` or `.rpm` upgrade replaces the old desktop
+entry and icons; pins or favourites made with the old desktop id are lost.
 
 The `.deb` and `.rpm` are built by `cargo-deb` and `cargo-generate-rpm` (versions pinned in
 `release.yml`) from the same stripped release binaries as the tar.gz, with the same files under

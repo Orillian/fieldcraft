@@ -282,7 +282,7 @@ is committed and listed here with its exports.
 | assets/app-icon/icon.iconset/icon_256x256@2x.png | FieldCraft contributors | sips export (512 px) of assets/app-icon/icon.png | MIT OR Apache-2.0 |
 | assets/app-icon/icon.iconset/icon_512x512.png | FieldCraft contributors | sips export (512 px) of assets/app-icon/icon.png | MIT OR Apache-2.0 |
 | assets/app-icon/icon.iconset/icon_512x512@2x.png | FieldCraft contributors | sips export (1024 px) of assets/app-icon/icon.png | MIT OR Apache-2.0 |
-| packaging/macos/README.txt, packaging/linux/io.github.jyviko.fieldcraft.desktop, packaging/macos/entitlements.plist | FieldCraft contributors | Original packaging text: the disk image's install note, the Linux desktop entry and the (empty) hardened-runtime entitlements | MIT OR Apache-2.0 |
+| packaging/macos/README.txt, packaging/linux/io.github.tangencylabs.fieldcraft.desktop, packaging/linux/io.github.tangencylabs.fieldcraft.metainfo.xml, packaging/macos/entitlements.plist | FieldCraft contributors | Original packaging text: the disk image's install note, the Linux desktop entry, the AppStream metainfo and the (empty) hardened-runtime entitlements | MIT OR Apache-2.0 |
 | crates/ui-egui/fonts/Inter-SemiBold.ttf | The Inter Project Authors | https://github.com/rsms/inter release v4.1 (Inter-4.1.zip, extras/ttf/Inter-SemiBold.ttf), unmodified; licence text in crates/ui-egui/fonts/OFL.txt; the interface's caps labels (theme::LABEL_FAMILY) | SIL OFL 1.1 |
 | docs/sponsors/blacksmith-ci-powered.png | Blacksmith (blacksmith.sh) | "CI powered by Blacksmith" sponsor banner supplied by Blacksmith for the sponsorship credit; used only to credit the sponsor, not part of the application | © Blacksmith, used with permission |
 
@@ -307,6 +307,7 @@ is committed and listed here with its exports.
 | crates/io/src/roots.rs (the rules of read and write roots) | VectorCraft's automation roots (docs/mcp.md there) | MIT OR Apache-2.0 |
 | packaging/env.sh, packaging/.shellcheckrc, packaging/macos/package.sh, packaging/macos/Info.plist.in, packaging/linux/package.sh, packaging/linux/AppRun, packaging/windows/package.ps1 | SolidCraft `packaging/` and VectorCraft `packaging/` (signing and notarization in macos/package.sh) | MIT OR Apache-2.0 |
 | apps/fieldcraft/Cargo.toml (the run-time dependency lists of `[package.metadata.deb]` and `[package.metadata.generate-rpm]`) | SolidCraft `packaging/linux/nfpm.yaml` | MIT OR Apache-2.0 |
+| packaging/linux/flatpak-bundle.sh, packaging/linux/flatpak/io.github.tangencylabs.fieldcraft.yml | SolidCraft `packaging/linux/flatpak-bundle.sh`, `packaging/linux/flatpak/` (themselves adapted from PhotoCraft, https://github.com/storytold/photocraft, Apache-2.0) | MIT OR Apache-2.0 |
 | packaging/macos/import-cert.sh | VectorCraft `packaging/macos/import-cert.sh` | MIT OR Apache-2.0 |
 | packaging/windows/check-exe.ps1 | SolidCraft `packaging/windows/check-icon.ps1` | MIT OR Apache-2.0 |
 | apps/fieldcraft-web/ (the web runner, browser file services and downloads, Trunk configuration, index.html) | VectorCraft `apps/vectorcraft-web/` and SolidCraft `apps/solidcraft-web/` | MIT OR Apache-2.0 |

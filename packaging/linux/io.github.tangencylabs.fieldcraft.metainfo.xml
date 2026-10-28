@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metainfo, installed by the Flatpak (packaging/linux/flatpak/), which fills in the
+     release's version and date; packaging-lint.yml checks it with `appstreamcli validate`. -->
+<component type="desktop-application">
+  <id>io.github.tangencylabs.fieldcraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>FieldCraft</name>
+  <summary>Turn geometry into finite element models</summary>
+  <developer id="io.github.tangencylabs">
+    <name>FieldCraft contributors</name>
+  </developer>
+  <description>
+    <p>
+      FieldCraft turns geometry into analysis-ready finite element models: volume meshes,
+      materials, sections, boundary conditions, loads and steps.
+    </p>
+    <ul>
+      <li>Tetrahedral and hexahedral meshing of solid parts</li>
+      <li>Abaqus input, Nastran bulk data and LS-DYNA keyword decks</li>
+      <li>Its own solvers for linear static and modal problems</li>
+      <li>Every action is a command that scripts, the command line and agents can run</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.tangencylabs.fieldcraft.desktop</launchable>
+  <url type="homepage">https://tangency-labs.github.io/fieldcraft/</url>
+  <url type="bugtracker">https://github.com/tangency-labs/fieldcraft/issues</url>
+  <url type="vcs-browser">https://github.com/tangency-labs/fieldcraft</url>
+  <categories>
+    <category>Science</category>
+    <category>Engineering</category>
+  </categories>
+  <keywords>
+    <keyword>FEA</keyword>
+    <keyword>FEM</keyword>
+    <keyword>finite element</keyword>
+    <keyword>mesh</keyword>
+    <keyword>CAE</keyword>
+  </keywords>
+  <provides>
+    <binary>fieldcraft</binary>
+    <binary>fieldcraft-cli</binary>
+  </provides>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@">
+      <url type="details">https://github.com/tangency-labs/fieldcraft/releases/tag/v@VERSION@</url>
+    </release>
+  </releases>
+</component>
