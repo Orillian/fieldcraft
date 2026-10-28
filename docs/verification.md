@@ -60,9 +60,11 @@ cargo xtask oracle --nightly            # also run the cases marked "nightly"
      "known_failure": "optional: why FieldCraft misses the reference today"}]}
   ```
   A measure reads a JSON pointer either from a recipe step's output (`"from": "<id>"`) or from a
-  command run after the recipe (`"command"`, `"params"`); an optional `"scale"` multiplies it, and
-  an optional `"over"` (a measure of its own) divides it by another number of the same run, for
-  ratios such as the stress in one element over the stress in another.
+  command run after the recipe (`"command"`, `"params"`); an optional `"scale"` multiplies it, an
+  optional `"plus"` (a measure of its own) adds another number of the same run (the mean of two
+  nodes, each scaled by ½), and an optional `"over"` (a measure of its own) divides the result by
+  another number of the same run, for ratios such as the stress in one element over the stress
+  in another.
   A case too long for every change (minutes) is marked `"nightly": true`: it runs in the nightly,
   manual and release runs (`--nightly`), or when named with `--case` or `--bless`; any other run
   checks it by its fixture (a fixture that misses an edited reference fails), and docs/oracle.md
