@@ -1,0 +1,7 @@
+[
+ {"command": "model.units", "params": {"system": "m-kg-s-N-Pa", "temperature": "°C"}},
+ {"command": "model.material.create", "params": {"name": "Melt", "density": 1.0, "fluid": {"type": "newtonian", "viscosity": 0.1}, "thermal": {"conductivity": 0.05, "specific_heat": 1.0}, "phase_change": {"latent_heat": 2.0, "solidus": 0.0, "liquidus": 0.0}}},
+ {"command": "model.fluid_domain.create", "params": {"name": "Column", "material": "Melt", "min": [0, 0, 0], "max": [0.015625, 2.0, 0.015625], "spacing": 0.015625, "faces": {"x_min": {"type": "periodic"}, "x_max": {"type": "periodic"}, "z_min": {"type": "periodic"}, "z_max": {"type": "periodic"}}, "thermal": {"initial_temperature": 0.5, "faces": {"y_min": {"type": "temperature", "value": -1.0}}}}},
+ {"command": "model.step.create", "params": {"name": "Run", "procedure": {"type": "fluid", "domain": "Column", "end_time": 3.0517578125, "time_step": 6.103515625e-4, "frames": 1}}},
+ {"command": "solve.fluid", "params": {"step": "Run"}, "id": "solve"}
+]

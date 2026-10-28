@@ -1,0 +1,80 @@
+{
+ "title": "A channel frozen on its cold quarter: plane Poiseuille flow in the liquid layer",
+ "kind": "theory",
+ "source": "Steady conduction between walls held at −1 and +1 with the melting point at −0.5 (the front at a quarter of the gap), and plane Poiseuille flow driven by a body force between the front and the far wall, u_max = a (H − y*)² / (8 ν) at the layer's middle",
+ "quantities": [
+  {
+   "id": "front",
+   "quantity": "frozen thickness Σ(1 − f_l)Δx / H",
+   "measure": {
+    "from": "solve",
+    "pointer": "/frozen"
+   },
+   "value": 0.25,
+   "tolerance": {
+    "absolute": 1e-06
+   },
+   "reason": "the steady front lies on a cell face on every grid of the refinement study (16 to 128 cells across), so each cell is wholly frozen or wholly liquid; measured below 10⁻⁶"
+  },
+  {
+   "id": "u_max",
+   "quantity": "largest velocity across the gap, a (H − y*)² / (8 ν)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Run",
+     "line": {
+      "from": [
+       0.0078125,
+       0.0078125,
+       0.0078125
+      ],
+      "to": [
+       0.0078125,
+       0.9921875,
+       0.0078125
+      ],
+      "count": 64,
+      "field": "velocity_x"
+     }
+    },
+    "pointer": "/line/max/velocity"
+   },
+   "value": 0.000703125,
+   "tolerance": {
+    "relative": 0.022
+   },
+   "reason": "the error at this grid (+1.47 %) plus the change to the next finer grid (0.74 %); the error halves with the cell (first order: the frozen cells are held still by a drag at their centres, so the effective wall sits about 0.35 Δx inside the frozen layer): the refinement study (README)"
+  },
+  {
+   "id": "u_max_at",
+   "quantity": "its height, (H + y*) / 2",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Run",
+     "line": {
+      "from": [
+       0.0078125,
+       0.0078125,
+       0.0078125
+      ],
+      "to": [
+       0.0078125,
+       0.9921875,
+       0.0078125
+      ],
+      "count": 64,
+      "field": "velocity_x"
+     }
+    },
+    "pointer": "/line/max/xyz/1"
+   },
+   "value": 0.625,
+   "tolerance": {
+    "absolute": 0.004
+   },
+   "reason": "the error at this grid (−2.7·10⁻³) plus the change to the next finer grid (1.3·10⁻³): the refinement study (README)"
+  }
+ ]
+}

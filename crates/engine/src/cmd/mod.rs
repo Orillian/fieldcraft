@@ -154,6 +154,7 @@ pub static ALL: &[CommandSpec] = &[
     define::MATERIAL_DAMAGE,
     define::MATERIAL_PVT,
     define::MATERIAL_SPECIFIC_VOLUME,
+    define::MATERIAL_PHASE_CHANGE,
     define::SECTION_CREATE,
     define::SECTION_EDIT,
     define::SECTION_DELETE,

@@ -247,6 +247,19 @@ const PVT: Field = variants(
 )
 .help("Specific volume against temperature and pressure (the modified two-domain Tait equation of a polymer): its density ρ = 1/v where the state is known.");
 
+const PHASE_CHANGE: Field = group(
+    "phase_change",
+    "Phase change",
+    &[
+        positive("latent_heat", "Latent heat", D::Of(Quantity::SpecificEnergy))
+            .help("Heat a unit mass releases as it freezes. Water ≈ 334 kJ/kg, aluminium ≈ 397 kJ/kg.")
+            .req(),
+        num("solidus", "Solidus", D::Temperature).help("Below it the material is solid and a fluid stops flowing.").req(),
+        num("liquidus", "Liquidus", D::Temperature).help("Above it the material is liquid; equal to the solidus for a pure substance.").req(),
+    ],
+)
+.help("Melting and freezing: the latent heat released between the liquidus and the solidus. Needs a specific heat.");
+
 pub const MATERIAL: &[Field] = &[
     NAME,
     ELASTIC,
@@ -258,6 +271,7 @@ pub const MATERIAL: &[Field] = &[
     EROSION,
     THERMAL,
     PVT,
+    PHASE_CHANGE,
     variants(
         "fluid",
         "Fluid",
@@ -329,6 +343,8 @@ pub const MATERIAL_SPECIFIC_VOLUME: &[Field] = &[
     num("temperature", "Temperature", D::Temperature).help("The temperature of the state.").req(),
     positive("pressure", "Pressure", D::Stress).help("The pressure of the state.").def("0"),
 ];
+
+pub const MATERIAL_PHASE_CHANGE: &[Field] = &[reference("name", "Material", C::Material).help("The material to change.").req(), PHASE_CHANGE.req()];
 pub const MATERIAL_DAMAGE: &[Field] = &[
     reference("name", "Material", C::Material).help("The material to change.").req(),
     DAMAGE.def(r#"{"type": "johnson_cook"}"#).hint("give damage, erosion or both"),

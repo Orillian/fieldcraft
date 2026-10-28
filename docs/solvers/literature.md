@@ -854,6 +854,16 @@ D3Q19 f32 ≈ 80 B/cell (with flags): 10⁸ cells ≈ 8 GB. These numbers decide
 - **Limits.** Staircase interfaces (cell faces, not the true surface): curved interfaces lose
   accuracy, which cut cells with the flux on the true surface recover; a steady run scales the
   solids' heat capacity, so its transient is not physical.
+- **Melting and freezing.** The total-enthalpy lattice of R. Huang, H. Wu, P. Cheng, *A new
+  lattice Boltzmann model for solid–liquid phase change*, Int. J. Heat Mass Transfer 59:295–301,
+  2013: the scalar lattice carries E = T + (L/c) f_l, its rest equilibrium shifted by E − T, so the
+  latent heat needs no source term and no iteration (the enthalpy method, V. R. Voller, Numer.
+  Heat Transfer B 17:155, 1990). The flow stops in frozen cells by the enthalpy–porosity
+  Carman–Kozeny resistance of V. R. Voller, C. Prakash, Int. J. Heat Mass Transfer 30:1709, 1987,
+  taken implicitly as Guo and Zhao's porous force. Verified against Neumann's two-phase Stefan
+  solution (H. S. Carslaw, J. C. Jaeger, *Conduction of Heat in Solids*, 2nd ed., 1959, §11.2).
+  The front is diffuse over a cell, so the flow along it converges at first order; an immersed
+  or partial bounce-back front (Huang & Wu, J. Comput. Phys. 294:346, 2015) would sharpen it.
 
 ### C10. Shear-dependent (generalised Newtonian) viscosity, as implemented
 

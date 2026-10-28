@@ -23,6 +23,7 @@ Conversion goes at the command/file boundary; storage becomes SI.
 | | JC reference_strain_rate | frequency (1/s) |
 | | JC room/melt temperature, thermal reference_temperature | temperature (absolute) |
 | | conductivity, specific_heat, expansion | conductivity, specific heat, expansion (1/ΔT) |
+| | phase change latent_heat, solidus, liquidus | specific energy, temperature (absolute) |
 | | density; fluid viscosity (doc: "1e-9 MPa·s for water") | density; dynamic viscosity |
 | `pvt.rs` | Tait b1, b7; b2; b3; b4, b8; b5; b6; b9 (#159) | **specific volume** (m³/kg); **specific volume per temperature** (m³/(kg·K)); pressure; expansion (1/ΔT); temperature (absolute); **temperature per pressure** (K/Pa); **inverse pressure** (1/Pa) — the four new quantities follow the display system's volume, mass, pressure and temperature step (`units/display.rs`) |
 | `sections.rs` | profile dims, shell thickness/offset, 2D thickness, area | length, area |

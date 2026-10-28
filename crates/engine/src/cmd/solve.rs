@@ -958,6 +958,7 @@ fn fluid_summary(r: &FluidResult, display: &DisplaySystem) -> Value {
         "forces": forces,
         "tau_thermal": r.stats.tau_thermal,
         "temperature": temperature,
+        "frozen": r.stats.frozen,
         "heat": heat,
         "solids": solids,
         "components_ok": r.components_ok(),
@@ -2119,6 +2120,7 @@ pub(crate) mod tests {
             backend: "cpu".into(),
             tau_thermal: None,
             eddy_viscosity_ratio: None,
+            frozen: None,
         };
         // Per preset: the mean temperature's mean and rms, and the residual's mean, as shown.
         for (preset, mean_t, rms_t, residual, units) in [

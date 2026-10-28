@@ -2627,6 +2627,12 @@ impl crate::backend::Backend for Flow {
         Flow::is_fluid(self, cell)
     }
 
+    fn frozen(&self) -> Option<f64> {
+        let phase = self.phase()?;
+        let solid: f64 = phase.liquid.iter().zip(&self.fluid).filter(|(_, fluid)| **fluid).map(|(f, _)| 1.0 - f).sum();
+        Some(solid / self.fluid_cells.max(1) as f64)
+    }
+
     fn eddy_viscosity_ratio(&self) -> f64 {
         Flow::eddy_viscosity_ratio(self)
     }

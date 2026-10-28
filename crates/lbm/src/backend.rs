@@ -50,6 +50,12 @@ pub trait Backend {
     fn eddy_viscosity_ratio(&self) -> f64 {
         0.0
     }
+    /// With a phase change: the mean over the fluid cells of the solid fraction now. A backend
+    /// without melting and freezing refuses a flow with them when it is made, so the default is
+    /// none.
+    fn frozen(&self) -> Option<f64> {
+        None
+    }
     /// The mean over the fluid cells of the velocity along `axis` (0, 1, 2; lattice units, with
     /// the half force): what a flow held at a constant flow rate controls.
     fn mean_velocity(&mut self, axis: usize) -> Result<f64> {

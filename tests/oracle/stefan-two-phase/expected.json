@@ -1,0 +1,67 @@
+{
+ "title": "Two-phase Stefan problem: a liquid frozen from a cold wall (Neumann's solution)",
+ "kind": "theory",
+ "source": "H. S. Carslaw, J. C. Jaeger, Conduction of Heat in Solids, 2nd ed., Oxford 1959, §11.2 (Neumann's solution); λ solved from its transcendental equation",
+ "quantities": [
+  {
+   "id": "front",
+   "quantity": "frozen thickness Σ(1 − f_l)Δx at t = 3.0517578125, 2 λ √(α t) (the solve's frozen share of the 2-long column, times 2)",
+   "measure": {
+    "from": "solve",
+    "pointer": "/frozen",
+    "scale": 2.0
+   },
+   "value": 0.29953895521189444,
+   "tolerance": {
+    "relative": 0.004
+   },
+   "reason": "the error at this grid (+0.27 %) plus the change to the next finer grid (0.09 %): the refinement study (README)"
+  },
+  {
+   "id": "t_solid",
+   "quantity": "temperature at y = 0.1484375 (in the solid)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Run",
+     "points": [
+      [
+       0.0078125,
+       0.1484375,
+       0.0078125
+      ]
+     ]
+    },
+    "pointer": "/points/0/temperature"
+   },
+   "value": -0.4862437444352744,
+   "tolerance": {
+    "absolute": 0.001
+   },
+   "reason": "the error at this grid (3.6·10⁻⁴) plus a margin of the same size; at 128 cells the error is below 10⁻⁵: the refinement study (README)"
+  },
+  {
+   "id": "t_liquid",
+   "quantity": "temperature at y = 0.5078125 (in the liquid)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Run",
+     "points": [
+      [
+       0.0078125,
+       0.5078125,
+       0.0078125
+      ]
+     ]
+    },
+    "pointer": "/points/0/temperature"
+   },
+   "value": 0.1954294389605004,
+   "tolerance": {
+    "absolute": 0.004
+   },
+   "reason": "the error at this grid (2.2·10⁻³, 0.15 % of the 1.5 range) plus the change to the next finer grid (1.1·10⁻³): the refinement study (README)"
+  }
+ ]
+}

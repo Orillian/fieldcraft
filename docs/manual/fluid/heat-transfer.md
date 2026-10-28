@@ -5,16 +5,17 @@ D3Q7, advects it with the velocity of the momentum lattice and diffuses it with 
 diffusivity k / (ρ c). The temperature drives the flow back through Boussinesq buoyancy. Obstacles
 can conduct heat (conjugate heat transfer), with their own conductivity, heat capacity and power,
 coupled to the fluid at every face they share, and with thermal interface layers between touching
-solids. The solve reports the heat into every wall and each conducting solid's peak temperature
+solids. A fluid whose material has a phase change melts and freezes: the lattice carries its
+enthalpy, the latent heat is released at the front, and the flow stops where it has frozen. The solve reports the heat into every wall and each conducting solid's peak temperature
 against its limit.
 
 | | |
 |---|---|
-| **Commands** | `model.fluid_domain.create` / `.edit` (`thermal`), `model.fluid_domain.thermal_boundary`, `model.fluid_domain.limit`, `solve.fluid`, `solve.probe` |
+| **Commands** | `model.fluid_domain.create` / `.edit` (`thermal`), `model.fluid_domain.thermal_boundary`, `model.fluid_domain.limit`, `model.material.phase_change`, `solve.fluid`, `solve.probe` |
 | **Step procedure** | `"fluid"` on a domain with `thermal` settings |
 | **Solver** | `crates/lbm` (CPU, f64); `crates/lbm-gpu` (GPU, f32), conducting solids and contacts included |
 | **Method** | D3Q7 passive scalar with two relaxation times (Krüger et al. 2017; Ginzburg 2005); cell-centred finite-volume conduction in solids (Patankar 1980) coupled through anti-bounce-back links (Li, Mei & Klausner 2013) |
-| **Verified by** | oracle `de-vahl-davis-ra1e3` … `ra1e6`, `conjugate-cavity-centred-body`; `crates/lbm/tests/thermal.rs`, `crates/lbm/tests/conjugate.rs` |
+| **Verified by** | oracle `de-vahl-davis-ra1e3` … `ra1e6`, `conjugate-cavity-centred-body`, `stefan-two-phase`, `frozen-channel-poiseuille`; `crates/lbm/tests/thermal.rs`, `crates/lbm/tests/conjugate.rs`, `crates/lbm/tests/solidification.rs` |
 
 ## Synopsis
 
@@ -80,6 +81,22 @@ either `resistance` (per area, K·m²/W in SI) or `thickness` with `conductivity
 both. Solids not listed touch perfectly. One contact per pair.
 
 The fluid's material needs a positive isotropic conductivity and a positive specific heat.
+
+**Phase change** of the fluid's material (`model.material.phase_change`, or `phase_change` in
+`model.material.create` / `.edit`; `null` removes it):
+
+```json
+{"name": "Water", "phase_change": {"latent_heat": 3.34e11, "solidus": 0, "liquidus": 0}}
+```
+
+| Field | Value | Meaning |
+|---|---|---|
+| `latent_heat` | > 0, energy per mass | Released as the material freezes (mJ/t in mm-t-s: water 3.34e11, J/kg in SI). |
+| `solidus` | temperature | Below it the material is solid and does not flow. |
+| `liquidus` | temperature, at least the solidus | Above it the material is liquid; equal to the solidus for a pure substance's isothermal front. |
+
+It needs the material's specific heat. Conducting solids with a phase change are refused (only
+the fluid melts and freezes), and so is the GPU backend.
 
 ## Theory
 
@@ -177,6 +194,25 @@ temperatures do not depend on it, while a solid's own time constant (seconds to 
 sink, against milliseconds for the air around it) would otherwise set the run's length. The run
 warns that the transient before the steady state is not physical.
 
+**Melting and freezing.** With a phase change the scalar lattice carries the total enthalpy in
+temperature units, E = T + (L / c) f_l, where f_l is the liquid fraction (Huang, Wu & Cheng 2013).
+The rest population's equilibrium becomes E − T + w₀ T and the others keep w_q T (1 + 4 c_q·u), so
+the populations sum to E, carry the flux T u and diffuse T:
+
+```text
+∂E/∂t + ∇·(T u) = ∇·(α ∇T)
+```
+
+The latent heat is released as E falls, with no source term and no iteration (the enthalpy method,
+Voller 1990). T and f_l follow from E: solid (f_l = 0, T = E) below the solidus, liquid (f_l = 1,
+T = E − L/c) above the liquidus plus L/c, and f_l linear in between, T rising from the solidus to
+the liquidus with it. Walls, inlets and the conjugate interface act on T as before; an inlet holds
+the enthalpy of its temperature. The flow stops where the fluid has frozen: every cell's velocity
+carries the Carman–Kozeny resistance A (1 − f_l)² / (f_l³ + ε) per step, A = 100 and ε = 1e-4 in
+lattice units (Voller & Prakash 1987; `MUSHY`), taken implicitly like a porous zone's (Guo & Zhao
+2002). A frozen cell's velocity is about 2ε/A = 2e-6 of what it would be, a half-frozen cell's
+1/100, and above f_l 0.95 the flow is barely touched.
+
 ## Algorithm
 
 Set-up:
@@ -200,8 +236,9 @@ Each time step:
 3. Scalar collision with the velocity the momentum lattice collided to (τ_T raised by α_t with
    turbulence).
 4. Scalar streaming with the wall, interface, inlet and outlet rules above.
-5. Each cell's temperature; conduction in the solids by sub-steps, each solving its cells'
-   balance with the interface heat implicit.
+5. Each cell's temperature (with a phase change, its temperature and liquid fraction from its
+   enthalpy); conduction in the solids by sub-steps, each solving its cells' balance with the
+   interface heat implicit. The liquid fractions set the next step's resistance.
 6. A temperature that is not a number stops the run as unstable, naming the step.
 
 The heat each wall face receives is summed over its links like the momentum exchange. Links into
@@ -220,6 +257,7 @@ reported twice its heat, #675).
 | `heat` | Per wall with non-zero heat (box face or obstacle face, with its `body`): the power into it, `final` and `mean` over the last quarter of the history; positive into the wall. |
 | `solids` | Per conducting solid: `body`, `cells`, `power`, `heat_to_fluid` (`final`, `mean`: what its faces give the fluid), `temperature` (`min`, `max`, `mean` at the end), `capacity_scale` (when scaled), `peak` and `peak_time`, `limit`, `margin` (limit less peak; negative over it), `ok`. |
 | `components_ok` | Whether every solid with a limit stays at or under it; null when none has a limit. |
+| `frozen` | With a phase change: the share of the fluid frozen at the end, the mean over the fluid cells of 1 − f_l; null without. Reported by the solve, not saved with the results. |
 
 The `peak` is the solid's steady value when the run stopped as steady (its last frame), else the
 highest over the run's frames (a transient peak between two frames is not seen; more frames
@@ -359,6 +397,30 @@ heavy).
 | Insulating cylinders on 32 and 64 cells | the series | −2.99 %, −1.21 %: first order or better | `insulating_cylinders_converge_at_first_order` (heavy) |
 | Slab against limits either side of its peak | peak 7.625 °C, pass and fail | 2 % | `a_heated_slab_passes_and_fails_limits_either_side_of_its_peak` |
 
+**Melting and freezing** (`crates/lbm/tests/solidification.rs`; CPU):
+
+| Case | Reference | Measured | Tolerance |
+|---|---|---|---|
+| Two-phase Stefan problem: liquid at +0.5 frozen from a wall at −1, melting at 0, L/c = 2 (Stefan numbers 0.5 and 0.25), frozen to 0.3 | Neumann's front 2 λ √(α t), λ = 0.38341 (Carslaw & Jaeger 1959, §11.2) | front within 0.97 % (64 cells per unit) and 0.27 % (128); temperatures within 9.0e-3 and 1.7e-3 of the 1.5 range | 1.2 %, 0.4 %; 0.8 %, 0.15 % |
+| The same | the heat into the cold wall is the fall in the total enthalpy | 1.4e-14, 3.5e-14 | 1e-10 |
+| Channel between walls at −1 and +1, melting at −0.5, driven along it | frozen on the cold quarter; plane Poiseuille flow Q = a (H − y*)³ / (12 ν) in the liquid; frozen cells still | +8.9 % (16 cells), +4.4 % (32): first order; frozen cells at 1e-7 of the peak speed | 9.5 %, 4.8 %; 5e-7 |
+| Water in a box frozen from one face, through commands | units, the `frozen` share (a regression pin), refusals | 0.221611 | 1e-6 relative; `water_freezes_on_a_cold_face` (engine) |
+
+The same two problems run through commands as oracle cases (docs/oracle.md; each case's README
+has its refinement study), at the end of the run, 64 cells per unit:
+
+| Case | Quantity | Reference | FieldCraft | Error | Tolerance |
+|---|---|---|---|---|---|
+| `stefan-two-phase` | frozen thickness | 0.29954 | 0.30036 | +0.27 % | 0.4 % |
+| | T in the solid, y = 0.1484 | −0.48624 | −0.48588 | 3.6e-4 | 1e-3 |
+| | T in the liquid, y = 0.5078 | 0.19543 | 0.19767 | 2.2e-3 | 4e-3 |
+| `frozen-channel-poiseuille` | frozen share | 0.25 | 0.25 | < 1e-6 | 1e-6 |
+| | largest velocity, a (H − y*)² / (8 ν) | 7.0312e-4 | 7.1344e-4 | +1.47 % | 2.2 % |
+| | its height | 0.625 | 0.62226 | −2.7e-3 | 4e-3 |
+
+Tests: `a_freezing_front_follows_neumanns_solution`, `a_frozen_layer_stops_the_flow`. The GPU
+backend refuses a phase change (`melting_and_freezing_are_refused_clearly`).
+
 A measurement of a curved conjugate interface, Rahman et al.'s vented cavity with a passive
 conducting cylinder (40 cells), runs in the heavy job as a regression guardrail: its
 heated-wall Nusselt number stays within 2 % of the published 4.842449. That is not the 1 % target
@@ -383,13 +445,21 @@ conductor filling the box and a low-capacity solid, temperature and heat within 
   inlets, walls, pressures, fans and the driving acceleration ([Lattice Boltzmann
   flow](lattice-boltzmann.md)).
 - A solid's peak is read from the frames: a transient peak between two frames is missed.
+- Melting and freezing: the front is diffuse over about one cell, and the liquid sees the frozen
+  layer as a no-slip wall about a third of a cell inside it, so the flow along a front converges
+  at first order (+4.4 % flow rate with 24 cells across the liquid). The mushy-zone resistance is a
+  fixed lattice constant, not a permeability of the material. The density, conductivity and
+  specific heat are the same in both phases, so there is no shrinkage and no change of
+  conductivity on freezing. Filling (a melt front entering an empty mould) needs free-surface flow
+  (#155). The GPU backend and conducting solids refuse a phase change.
 - The heated square cylinder in a channel (Dhiman, Chhabra & Eswaran 2005) is a pending oracle case
   with its reference values not yet transcribed.
 
 ## Implementation
 
 - `crates/lbm/src/flow.rs`: `ThermalState`, `collide_thermal`, `stream_thermal`,
-  `open_boundaries_thermal`, `refresh_buoyancy`, `update_temperature`, `conduct`.
+  `open_boundaries_thermal`, `refresh_buoyancy`, `update_temperature`, `conduct`; `Phase`,
+  `MUSHY`, `freezing` (melting and freezing).
 - `crates/lbm/src/conduction.rs`: `SolidHeat::build`, `series`, `with_resistance`,
   `smallest_capacity`, `MAX_SUBSTEPS`.
 - `crates/lbm/src/setup.rs`: `ThermalSetup`, `SolidSetup`, `ContactSetup`, `thermal_magic`,
@@ -399,9 +469,10 @@ conductor filling the box and a low-capacity solid, temperature and heat within 
 - `crates/lbm-gpu/src/lbm.wgsl`: the scalar lattice and "Conducting solids"; `native.rs`
   `solid_data`.
 - `crates/model/src/fluids.rs`: `FluidThermal`, `ThermalCondition`, `ConductingSolid`,
-  `ThermalContact`.
+  `ThermalContact`; `crates/model/src/materials.rs`: `PhaseChange`.
 - `crates/engine/src/cmd/define.rs`: `model.fluid_domain.thermal_boundary`,
-  `model.fluid_domain.limit`; `crates/engine/src/cmd/solve.rs`: the reply and `solve.probe`.
+  `model.fluid_domain.limit`, `model.material.phase_change`; `crates/engine/src/cmd/solve.rs`: the
+  reply and `solve.probe`.
 
 ## References
 
@@ -419,3 +490,8 @@ conductor filling the box and a low-capacity solid, temperature and heat within 
 - W. T. Perrins, D. R. McKenzie, R. C. McPhedran. *Transport properties of regular arrays of cylinders.* Proc. R. Soc. Lond. A 369:207–225, 1979.
 - Y. A. Godin. J. Math. Phys. 53:063703, 2012.
 - A. K. Dhiman, R. P. Chhabra, V. Eswaran. *Flow and heat transfer across a confined square cylinder in the steady flow regime: effect of Peclet number.* Int. J. Heat Mass Transfer 48:4598–4614, 2005. doi:[10.1016/j.ijheatmasstransfer.2005.04.033](https://doi.org/10.1016/j.ijheatmasstransfer.2005.04.033)
+- R. Huang, H. Wu, P. Cheng. *A new lattice Boltzmann model for solid–liquid phase change.* Int. J. Heat Mass Transfer 59:295–301, 2013.
+- V. R. Voller. *Fast implicit finite-difference method for the analysis of phase change problems.* Numer. Heat Transfer B 17:155–169, 1990.
+- V. R. Voller, C. Prakash. *A fixed grid numerical modelling methodology for convection–diffusion mushy region phase-change problems.* Int. J. Heat Mass Transfer 30(8):1709–1719, 1987.
+- Z. Guo, T. S. Zhao. *Lattice Boltzmann model for incompressible flows through porous media.* Phys. Rev. E 66:036304, 2002.
+- H. S. Carslaw, J. C. Jaeger. *Conduction of Heat in Solids*, 2nd ed. Oxford, 1959 (§11.2, Neumann's solution).

@@ -1,0 +1,17 @@
+{
+  "note": "FieldCraft's accepted results for this case, written by `cargo xtask oracle --bless`. A result outside its band fails CI.",
+  "values": {
+    "front": {
+      "band": 3.0035744421609575e-10,
+      "value": 0.3003574442160957
+    },
+    "t_liquid": {
+      "band": 4.000197669416666e-6,
+      "value": 0.197669416666
+    },
+    "t_solid": {
+      "band": 1.0004862437444352e-6,
+      "value": -0.48587965965270996
+    }
+  }
+}

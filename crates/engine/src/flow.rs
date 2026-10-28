@@ -614,6 +614,7 @@ pub(crate) mod tests {
             backend: "cpu".into(),
             tau_thermal: None,
             eddy_viscosity_ratio: None,
+            frozen: None,
         };
         FluidResult {
             step: "Flow".into(),
@@ -649,6 +650,51 @@ pub(crate) mod tests {
         s.run_script(&script).unwrap();
         s.execute("solve.fluid", &json!({})).unwrap();
         s
+    }
+
+    /// Water in a box freezes on a face held at −10 °C, through commands: the phase change is
+    /// typed in the display system (mm-t-s: mJ/t and °C) and stored in SI, the solve reports the
+    /// share that froze, and a material without a specific heat, a liquidus below the solidus or a
+    /// missing material are refused with the model unchanged.
+    #[test]
+    fn water_freezes_on_a_cold_face() {
+        let mut s = crate::Session::default();
+        let script = json!([
+            {"command": "model.material.create", "params": {"name": "Water", "density": 1e-9, "fluid": {"type": "newtonian", "viscosity": 1e-9},
+                "thermal": {"conductivity": 0.6, "specific_heat": 4.2e9}}},
+            {"command": "model.material.phase_change", "params": {"name": "Water", "phase_change": {"latent_heat": 3.34e11, "solidus": 0, "liquidus": 0}}},
+            {"command": "model.fluid_domain.create", "params": {"name": "Box", "material": "Water", "min": [0, 0, 0], "max": [10, 10, 10], "spacing": 2,
+                "thermal": {"initial_temperature": 5, "faces": {"y_min": {"type": "temperature", "value": -10}}}}},
+            {"command": "model.step.create", "params": {"name": "Cool", "procedure": {"type": "fluid", "domain": "Box", "steps": 200, "frames": 2}}},
+        ]);
+        s.run_script(&script).unwrap();
+        let p = s.model.material("Water").and_then(|m| m.phase_change).unwrap();
+        assert!((p.latent_heat - 3.34e5).abs() < 1e-6 && (p.solidus - 273.15).abs() < 1e-9 && p.liquidus == p.solidus, "{p:?}");
+        let r = s.execute("solve.fluid", &json!({})).unwrap();
+        let frozen = r["frozen"].as_f64().unwrap();
+        // a regression pin (measured 0.221611325): the front's accuracy is the lattice's tests'
+        // and the oracle's (stefan-two-phase, frozen-channel-poiseuille)
+        assert!((frozen / 0.221_611_325 - 1.0).abs() < 1e-6, "{r}");
+        assert!(r["temperature"]["min"].as_f64().unwrap() < 0.0, "{r}");
+        let before = s.model.clone();
+        for bad in [
+            json!({"name": "Water", "phase_change": {"latent_heat": 3.34e11, "solidus": 0, "liquidus": -1}}),
+            json!({"name": "Water", "phase_change": {"latent_heat": -1, "solidus": 0, "liquidus": 0}}),
+            json!({"name": "Water", "phase_change": {"latent_heat": 1, "solidus": 0}}),
+            json!({"name": "Water"}),
+            json!({"name": "Ice", "phase_change": null}),
+        ] {
+            assert!(s.execute("model.material.phase_change", &bad).is_err(), "{bad}");
+        }
+        let e = s.execute(
+            "model.material.edit",
+            &json!({"name": "Water", "density": 1e-9, "fluid": {"type": "newtonian", "viscosity": 1e-9},
+            "thermal": {"conductivity": 0.6}, "phase_change": {"latent_heat": 3.34e11, "solidus": 0, "liquidus": 0}}),
+        );
+        assert!(e.unwrap_err().to_string().contains("specific heat"));
+        assert_eq!(s.model, before);
+        s.execute("model.material.phase_change", &json!({"name": "Water", "phase_change": null})).unwrap();
+        assert!(s.execute("solve.fluid", &json!({})).unwrap()["frozen"].is_null());
     }
 
     /// The plate conducts heat and generates power in the tank's flow, through commands: the solve
