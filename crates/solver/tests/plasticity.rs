@@ -65,22 +65,24 @@ fn finite_strain_uniaxial_tension_follows_the_logarithmic_closed_form() {
         (ElementKind::Hex20, hybrid(), "hex20 hybrid"),
         (ElementKind::Tet10, hybrid(), "tet10 hybrid"),
     ]);
-    for (kind, formulation, name) in cases {
-        let g = cube(kind, formulation, NonlinearStatic::default(), bilinear(Hardening::Isotropic), strain.exp() - 1.0);
-        let r = solve(&g);
-        for e in &r.elements {
-            for (p, ep) in e.points.iter().zip(&e.plastic_strain) {
-                // J from the logarithmic strains, σ the Cauchy stress.
-                let j = (p.strain[0] + p.strain[1] + p.strain[2]).exp();
-                assert!((p.stress[0] * j - tau).abs() < 1e-7 * tau, "{name}: τ = {} vs {tau}", p.stress[0] * j);
-                assert!(p.stress[1].abs() < 1e-7 * tau && p.stress[3].abs() < 1e-7 * tau, "{name}: {:?}", p.stress);
-                assert!((ep - (tau - Y0) / H).abs() < 1e-9, "{name}: ε_p = {ep}");
-                assert!((p.strain[0] - strain).abs() < 1e-12, "{name}: {:?}", p.strain);
+    for hardening in [Hardening::Isotropic, Hardening::Kinematic] {
+        for &(kind, formulation, name) in &cases {
+            let g = cube(kind, formulation, NonlinearStatic::default(), bilinear(hardening), strain.exp() - 1.0);
+            let r = solve(&g);
+            for e in &r.elements {
+                for (p, ep) in e.points.iter().zip(&e.plastic_strain) {
+                    // J from the logarithmic strains, σ the Cauchy stress.
+                    let j = (p.strain[0] + p.strain[1] + p.strain[2]).exp();
+                    assert!((p.stress[0] * j - tau).abs() < 1e-7 * tau, "{name}: τ = {} vs {tau}", p.stress[0] * j);
+                    assert!(p.stress[1].abs() < 1e-7 * tau && p.stress[3].abs() < 1e-7 * tau, "{name}: {:?}", p.stress);
+                    assert!((ep - (tau - Y0) / H).abs() < 1e-9, "{name}: ε_p = {ep}");
+                    assert!((p.strain[0] - strain).abs() < 1e-12, "{name}: {:?}", p.strain);
+                }
+                assert_eq!(e.plastic_strain.len(), e.points.len(), "{name}");
             }
-            assert_eq!(e.plastic_strain.len(), e.points.len(), "{name}");
+            let h = r.nonlinear.as_ref().unwrap();
+            eprintln!("{name}: {} increments, {} iterations", h.increments.len(), h.iterations);
         }
-        let h = r.nonlinear.as_ref().unwrap();
-        eprintln!("{name}: {} increments, {} iterations", h.increments.len(), h.iterations);
     }
 }
 
@@ -139,37 +141,105 @@ fn kinematic_hardening_shows_the_bauschinger_effect_on_unloading() {
     }
 }
 
+/// A finite-strain cycle in uniaxial stress: the return acts on logarithmic strain
+/// and Kirchhoff stress, while the reported stress is Cauchy stress.
+#[test]
+fn finite_kinematic_cycle_matches_the_logarithmic_bauschinger_curve() {
+    let strain: f64 = 0.2;
+    let path = NonlinearStatic {
+        initial_increment: 0.05,
+        max_increment: 0.05,
+        load_path: Some(vec![[0.0, 0.0], [0.5, 1.0], [1.0, 0.0]]),
+        ..NonlinearStatic::default()
+    };
+    let et = E * H / (E + H);
+    let tau = uniaxial(strain) - 2.0 * Y0 - et * (strain - 2.0 * Y0 / E);
+    let bulk = E / (3.0 * (1.0 - 2.0 * NU));
+    let cauchy = tau / (tau / (3.0 * bulk)).exp();
+    let ep = (E * strain - Y0) / (E + H) + (E * strain - 2.0 * Y0) / (E + H);
+    for formulation in [full(), hybrid()] {
+        let r = solve(&cube(ElementKind::Hex8, formulation, path.clone(), bilinear(Hardening::Kinematic), strain.exp() - 1.0));
+        for e in &r.elements {
+            for (p, plastic) in e.points.iter().zip(&e.plastic_strain) {
+                assert!((p.stress[0] - cauchy).abs() < 1e-6 * cauchy.abs(), "{} vs {cauchy}", p.stress[0]);
+                assert!((plastic - ep).abs() < 1e-6 * ep, "{plastic} vs {ep}");
+                assert!(p.stress[1].abs() < 1e-6 * cauchy.abs());
+            }
+        }
+        assert!(r.displacement.iter().all(|u| u[0].abs() < 1e-12));
+    }
+}
+
+#[test]
+fn finite_kinematic_simple_shear_has_one_smooth_peak() {
+    let mut g = grid([1, 1, 1], ElementKind::Hex8, |x| x);
+    let step = NonlinearStatic { initial_increment: 0.01, max_increment: 0.01, ..NonlinearStatic::default() };
+    g.define(iso(E, NU), None, full(), Procedure::NonlinearStatic(step));
+    plastic(&mut g, bilinear(Hardening::Kinematic));
+    g.node_set("y0", |x| near(x[1], 0.0));
+    g.node_set("y1", |x| near(x[1], 1.0));
+    for (name, x) in [("y0", 0.0), ("y1", 5.0)] {
+        g.bc(name, BoundaryCondition::Displacement { target: Target::Set(name.into()), values: [Some(x), Some(0.0), None, None, None, None] });
+    }
+    // τ_zz = 0 on this planar path; leave the upper z face free to move normally.
+    g.symmetry("z0", Symmetry::Z, |x| near(x[2], 0.0));
+    let r = solve(&g);
+    let h = r.nonlinear.as_ref().unwrap();
+    assert!(h.increments.iter().filter(|i| i.converged).count() >= 100);
+    // J = 1 and P_xy = τ_xy: the y face's resultant is the Kirchhoff shear stress.
+    let curve: Vec<f64> = h
+        .frames
+        .iter()
+        .map(|frame| r.nodes.iter().enumerate().filter(|(_, label)| near(g.param[label][1], 1.0)).map(|(i, _)| frame.reaction_at(i)[0]).sum())
+        .collect();
+    let peak = curve.iter().enumerate().max_by(|(_, a), (_, b)| a.total_cmp(b)).unwrap().0;
+    assert!((2.6..2.9).contains(&(5.0 * h.frames[peak].load_factor)));
+    assert!(curve[..=peak].windows(2).all(|w| w[1] >= w[0]));
+    assert!(curve[peak..].windows(2).all(|w| w[1] <= w[0]));
+    assert!((curve.last().unwrap() - 870.981_040_199_553).abs() < 1e-3);
+    for (label, u) in r.nodes.iter().zip(&r.displacement) {
+        assert!((u[0] - 5.0 * g.param[label][1]).abs() < 1e-10);
+        assert!(u[1].abs() < 1e-10 && u[2].abs() < 1e-10);
+    }
+}
+
 /// Newton with the consistent tangent converges quadratically in a plastic structure: a notched
 /// bar pulled past general yield, and a cantilever bent into plastic flow at finite strain.
 #[test]
 fn plastic_newton_converges_quadratically() {
-    for nonlinear_geometry in [false, true] {
-        let mut step = NonlinearStatic { initial_increment: 0.5, nonlinear_geometry, ..NonlinearStatic::default() };
-        step.tolerances.force = 1e-8;
-        step.tolerances.displacement = 1e-8;
-        step.tolerances.energy = 1e-16;
-        let mut g = grid([8, 1, 2], ElementKind::Hex20, |q| [10.0 * q[0], q[1], q[2]]);
-        g.define(iso(E, NU), None, full(), Procedure::NonlinearStatic(step));
-        plastic(&mut g, bilinear(Hardening::Isotropic));
-        g.fixed("root", |q| near(q[0], 0.0));
-        g.node_set("tip", |q| near(q[0], 1.0));
-        // A tip deflection of ten times the first yield's.
-        let first_yield = 2.0 * Y0 * 100.0 / (3.0 * E * 2.0);
-        g.bc(
-            "push",
-            BoundaryCondition::Displacement { target: Target::Set("tip".into()), values: [None, None, Some(-10.0 * first_yield), None, None, None] },
-        );
-        let r = solve(&g);
-        assert!(r.elements.iter().flat_map(|e| &e.plastic_strain).any(|p| *p > 0.0), "plastic");
-        let h = r.nonlinear.unwrap();
-        let mut best = 0.0f64;
-        for inc in h.increments.iter().filter(|i| i.converged) {
-            let res: Vec<f64> = inc.iterations.iter().map(|i| i.force).collect();
-            let orders: Vec<f64> = res.windows(3).filter(|w| w[0] < 1e-2 && w[2] > 1e-11).map(|w| (w[2] / w[1]).ln() / (w[1] / w[0]).ln()).collect();
-            eprintln!("geometry {nonlinear_geometry}: increment {} (λ = {}): residuals {res:?}, orders {orders:?}", inc.number, inc.load_factor);
-            best = orders.iter().fold(best, |m, o| m.max(*o));
+    for hardening in [Hardening::Isotropic, Hardening::Kinematic] {
+        for nonlinear_geometry in [false, true] {
+            let mut step = NonlinearStatic { initial_increment: 0.5, nonlinear_geometry, ..NonlinearStatic::default() };
+            step.tolerances.force = 1e-8;
+            step.tolerances.displacement = 1e-8;
+            step.tolerances.energy = 1e-16;
+            let mut g = grid([8, 1, 2], ElementKind::Hex20, |q| [10.0 * q[0], q[1], q[2]]);
+            g.define(iso(E, NU), None, full(), Procedure::NonlinearStatic(step));
+            plastic(&mut g, bilinear(hardening));
+            g.fixed("root", |q| near(q[0], 0.0));
+            g.node_set("tip", |q| near(q[0], 1.0));
+            // A tip deflection of ten times the first yield's.
+            let first_yield = 2.0 * Y0 * 100.0 / (3.0 * E * 2.0);
+            g.bc(
+                "push",
+                BoundaryCondition::Displacement {
+                    target: Target::Set("tip".into()),
+                    values: [None, None, Some(-10.0 * first_yield), None, None, None],
+                },
+            );
+            let r = solve(&g);
+            assert!(r.elements.iter().flat_map(|e| &e.plastic_strain).any(|p| *p > 0.0), "plastic");
+            let h = r.nonlinear.unwrap();
+            let mut best = 0.0f64;
+            for inc in h.increments.iter().filter(|i| i.converged) {
+                let res: Vec<f64> = inc.iterations.iter().map(|i| i.force).collect();
+                let orders: Vec<f64> =
+                    res.windows(3).filter(|w| w[0] < 1e-2 && w[2] > 1e-11).map(|w| (w[2] / w[1]).ln() / (w[1] / w[0]).ln()).collect();
+                eprintln!("geometry {nonlinear_geometry}: increment {} (λ = {}): residuals {res:?}, orders {orders:?}", inc.number, inc.load_factor);
+                best = orders.iter().fold(best, |m, o| m.max(*o));
+            }
+            assert!(best > 1.8, "nonlinear geometry {nonlinear_geometry}: no quadratic convergence (best order {best})");
         }
-        assert!(best > 1.8, "nonlinear geometry {nonlinear_geometry}: no quadratic convergence (best order {best})");
     }
 }
 
@@ -196,14 +266,6 @@ fn plastic_steps_refuse_and_fail_cleanly() {
     // C = 0 is the rate-independent law: it solves, warning that a static step does not heat.
     let r = solve(&cube(ElementKind::Hex8, full(), NonlinearStatic::default(), jc(0.0), 0.01));
     assert!(r.warnings.iter().any(|w| w.contains("isothermal")), "{:?}", r.warnings);
-    let err = solve_nonlinear(
-        &cube(ElementKind::Hex8, full(), NonlinearStatic::default(), bilinear(Hardening::Kinematic), 0.01).model,
-        None,
-        &Limits::default(),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("kinematic hardening") && err.contains("finite strain"), "{err}");
     let small = NonlinearStatic { nonlinear_geometry: false, ..NonlinearStatic::default() };
     let err = solve_nonlinear(
         &cube(ElementKind::Hex8, incompatible(), small.clone(), bilinear(Hardening::Isotropic), 0.01).model,

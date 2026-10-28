@@ -97,8 +97,8 @@
 //! additive radial return at small strain, both with their consistent tangents, so Newton keeps
 //! its quadratic rate. The plastic history is committed when an increment converges and
 //! discarded when it is cut back. A static step has no time, so the Johnson–Cook strain-rate term
-//! is refused (C = 0 is the rate-independent law), and kinematic hardening at finite strain is
-//! refused (its back stress breaks the principal-frame return); damage, erosion and adiabatic
+//! is refused (C = 0 is the rate-independent law). Kinematic hardening at finite strain uses
+//! the full tensor return in Lagrangian logarithmic strain space; damage, erosion and adiabatic
 //! heating act in explicit dynamics only, with a warning. Results add the equivalent plastic
 //! strain at the integration points.
 //! Couplings stay the linear (small-rotation) constraints of the linear solver, with a warning.
@@ -124,8 +124,8 @@ use fieldcraft_fem::quadrature::Rule;
 use fieldcraft_fem::{DofKind, DofSet, ElementType, PointStress, face, von_mises};
 use fieldcraft_model::fluid_zones::curve_value;
 use fieldcraft_model::{
-    ArcConstraint, ArcLength, BoundaryCondition, Extent, Hardening, Imperfection, Load, Model, NonlinearStatic, OutputVariable, Plastic, Procedure,
-    SectionKind, Step,
+    ArcConstraint, ArcLength, BoundaryCondition, Extent, Imperfection, Load, Model, NonlinearStatic, OutputVariable, Plastic, Procedure, SectionKind,
+    Step,
 };
 use fieldcraft_parallel as parallel;
 use serde::Serialize;
@@ -1145,7 +1145,7 @@ fn check_supported(model: &Model, mesh: &Mesh, step: &Step, settings: &Nonlinear
     if let Some(name) = step.loads.iter().find(|n| matches!(model.load(n), Some(Load::Centrifugal { .. }))) {
         return Err(at(format!("centrifugal loads (load `{name}`), which depend on the deformed position")));
     }
-    plasticity(model, step, settings, warnings)?;
+    plasticity(model, step, warnings)?;
     if let Some(name) = model.contacts().keys().next()
         && settings.arc_length.is_some()
     {
@@ -1163,7 +1163,7 @@ fn check_supported(model: &Model, mesh: &Mesh, step: &Step, settings: &Nonlinear
 
 /// Refuse the plasticity a static step cannot take, and warn about what it leaves out, for the
 /// materials of the solid and 2D sections.
-fn plasticity(model: &Model, step: &Step, settings: &NonlinearStatic, warnings: &mut Vec<String>) -> Result<()> {
+fn plasticity(model: &Model, step: &Step, warnings: &mut Vec<String>) -> Result<()> {
     let at = |what: String| Error::NotSupported(format!("{what} in nonlinear steps (step `{}`)", step.name));
     let used: std::collections::BTreeSet<&str> = model
         .sections()
@@ -1173,25 +1173,17 @@ fn plasticity(model: &Model, step: &Step, settings: &NonlinearStatic, warnings: 
         .collect();
     for name in used {
         let Some(m) = model.material(name) else { continue };
-        match &m.plastic {
-            Some(Plastic::JohnsonCook { c, specific_heat, .. }) => {
-                if *c != 0.0 {
-                    return Err(at(format!(
-                        "the Johnson–Cook strain-rate term of material `{name}` (C = {c}): a static step has no time, so no strain rate; set C to 0 or use explicit dynamics"
-                    )));
-                }
-                if specific_heat.is_some() {
-                    warnings.push(format!(
-                        "material `{name}`: a static step is isothermal, so plastic work does not heat it (adiabatic heating acts in explicit dynamics)"
-                    ));
-                }
-            }
-            Some(Plastic::Bilinear { hardening: Hardening::Kinematic, .. }) if settings.nonlinear_geometry => {
+        if let Some(Plastic::JohnsonCook { c, specific_heat, .. }) = &m.plastic {
+            if *c != 0.0 {
                 return Err(at(format!(
-                    "the kinematic hardening of material `{name}` at finite strain (its back stress is not coaxial with the elastic stretch, which the exponential return map needs); use nonlinear_geometry false or isotropic hardening"
+                    "the Johnson–Cook strain-rate term of material `{name}` (C = {c}): a static step has no time, so no strain rate; set C to 0 or use explicit dynamics"
                 )));
             }
-            _ => {}
+            if specific_heat.is_some() {
+                warnings.push(format!(
+                    "material `{name}`: a static step is isothermal, so plastic work does not heat it (adiabatic heating acts in explicit dynamics)"
+                ));
+            }
         }
         if m.plastic.is_some() && (m.damage.is_some() || m.erosion.is_some()) {
             warnings.push(format!("material `{name}`: damage and erosion act in explicit dynamics; this static step leaves them out"));
