@@ -130,7 +130,7 @@ fn unpack(install: &Install, file: &Path, dir: &Path) -> Result<(PathBuf, Vec<St
             Ok((file.to_path_buf(), Vec::new()))
         }
         Install::Deb | Install::Rpm => Ok((file.to_path_buf(), Vec::new())),
-        Install::Unmanaged(why) => Err(Error::NotSupported(why.clone())),
+        Install::Flatpak | Install::Unmanaged(_) => Err(Error::NotSupported(install.unsupported().unwrap_or_default())),
     }
 }
 

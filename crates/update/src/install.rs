@@ -10,6 +10,7 @@
 //! | Linux AppImage | `fieldcraft-V-linux-x86_64.AppImage` | the file |
 //! | Linux tar.gz folder | `fieldcraft-V-linux-x86_64.tar.gz` | the folder |
 //! | `.deb` / `.rpm` (`/usr/bin`) | `fieldcraft_V_amd64.deb` / `fieldcraft-V.x86_64.rpm` | none: the system's package manager installs it |
+//! | Flatpak (`/app/bin`) | none | none: `flatpak update` installs it from the Flatpak repository |
 //!
 //! Each swap moves the installed item into the staging folder and the new one into its place,
 //! both renames within one folder's file system, and undoes the moves made when one fails.
@@ -41,6 +42,8 @@ pub enum Install {
     Deb,
     /// Installed by the RPM package (`/usr/bin`).
     Rpm,
+    /// The Flatpak (`/app/bin`, read-only): `flatpak update` installs new releases.
+    Flatpak,
     /// Not a release package (a development build, an unknown layout): it checks, but does not
     /// install. The reason, in words.
     Unmanaged(String),
@@ -90,6 +93,11 @@ pub fn detect(f: &Facts) -> Install {
             if packaged { Install::Windows { dir: dir.to_path_buf() } } else { unmanaged() }
         }
         "linux" => {
+            // The Flatpak sandbox (packaging/linux/flatpak): /app is read-only, and the Flatpak
+            // repository on Pages delivers each release.
+            if dir == Path::new("/app/bin") && (f.exists)(Path::new("/.flatpak-info")) {
+                return Install::Flatpak;
+            }
             if let Some(file) = f.appimage {
                 return Install::AppImage { file: file.to_path_buf() };
             }
@@ -140,7 +148,7 @@ impl Install {
             Install::Windows { dir } => Some(dir),
             Install::AppImage { file } => Some(file),
             Install::TarGz { root } => Some(root),
-            Install::Deb | Install::Rpm | Install::Unmanaged(_) => None,
+            Install::Deb | Install::Rpm | Install::Flatpak | Install::Unmanaged(_) => None,
         }
     }
 
@@ -156,6 +164,7 @@ impl Install {
     /// Why it cannot install updates itself, when it cannot.
     pub fn unsupported(&self) -> Option<String> {
         match self {
+            Install::Flatpak => Some("installed with Flatpak: `flatpak update` installs new releases".into()),
             Install::Unmanaged(why) => Some(why.clone()),
             _ => None,
         }
@@ -171,6 +180,7 @@ impl Install {
             Install::TarGz { root } => format!("the folder {}", root.display()),
             Install::Deb => "the Debian package".into(),
             Install::Rpm => "the RPM package".into(),
+            Install::Flatpak => "the Flatpak".into(),
             Install::Unmanaged(why) => why.clone(),
         }
     }
@@ -245,7 +255,7 @@ pub fn plan(s: &Staged, relaunch: bool) -> Result<Finish> {
         }
         Install::Deb => Finish::Package { file: s.payload.clone(), command: format!("sudo apt install {}", shell_quote(&s.payload)) },
         Install::Rpm => Finish::Package { file: s.payload.clone(), command: format!("sudo dnf install {}", shell_quote(&s.payload)) },
-        Install::Unmanaged(why) => return Err(Error::NotSupported(why.clone())),
+        Install::Flatpak | Install::Unmanaged(_) => return Err(Error::NotSupported(s.install.unsupported().unwrap_or_default())),
     })
 }
 
@@ -293,6 +303,10 @@ mod tests {
             Install::TarGz { root: "/opt/fc".into() }
         );
         assert!(matches!(detect_with("linux", "/src/target/debug/fieldcraft", None, &[]), Install::Unmanaged(_)));
+        // The Flatpak carries share/doc/fieldcraft/THIRD-PARTY-LICENSES.txt like the tar.gz, but /app is read-only.
+        let flatpak = detect_with("linux", "/app/bin/fieldcraft", None, &["/.flatpak-info", "/app/share/doc/fieldcraft/THIRD-PARTY-LICENSES.txt"]);
+        assert_eq!(flatpak, Install::Flatpak);
+        assert!(flatpak.unsupported().is_some_and(|why| why.contains("flatpak update")));
         assert!(matches!(detect_with("freebsd", "/usr/local/bin/fieldcraft", None, &[]), Install::Unmanaged(_)));
     }
 

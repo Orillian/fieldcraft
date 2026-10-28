@@ -60,6 +60,7 @@ behind is removed at the next start.
 | An AppImage | `fieldcraft-<v>-linux-x86_64.AppImage` | the file is replaced and started |
 | A tar.gz folder | `fieldcraft-<v>-linux-x86_64.tar.gz` | the folder is replaced; when its parent is not writable the app says so and links the download |
 | `.deb` / `.rpm` | `fieldcraft_<v>_amd64.deb` / `fieldcraft-<v>.x86_64.rpm` | never replaced by the app: the verified package is downloaded to the app's data folder (`updates/`), and the app offers **Open with Installer** and the `sudo apt install …` / `sudo dnf install …` command |
+| Flatpak | none | never replaced by the app: `flatpak update` installs new releases from the [Flatpak repository](releasing.md#flatpak-repository) |
 
 **Help › Reinstall FieldCraft…** downloads and verifies the running version again and swaps it
 in the same way, to repair a damaged install.
