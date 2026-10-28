@@ -22,10 +22,12 @@
 //!
 //! An element's quality is its scaled Jacobian (a triangle's: its smallest angle over 60°), from
 //! [`crate::quality::element_quality`]; a solid is valid when its certified Jacobian check is,
-//! a shell when its normal keeps its side. So no move inverts an element, and none makes the
-//! worst element around a node worse, and none makes an element's edge ratio exceed the
-//! region's largest before the relaxation, by more than round-off ([`ROUND_OFF`]: compared
-//! exactly, the guards made the result jump under a 1-ulp change of its input).
+//! a shell when its normal keeps its side. So no move inverts an element. Both other guards allow
+//! round-off ([`ROUND_OFF`], 1e-12): a kept move may lower the worst quality around a node by up
+//! to that much, and may leave an element's edge ratio up to that much (relative) above the
+//! region's largest before the relaxation. Compared exactly, the guards made the result jump
+//! under a 1-ulp change of its input; the margin moves the threshold away from the ±1-ulp ties
+//! seen in practice, but a margin within an ulp of the threshold can still flip.
 //!
 //! **Constraints** ([`Freedom`]): an interior node moves freely; a node on a geometry face moves
 //! in the face's parameters and is evaluated back on it ([`Constraints::slide_face`]); a node on a
