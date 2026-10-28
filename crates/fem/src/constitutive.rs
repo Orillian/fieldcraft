@@ -40,7 +40,8 @@
 //!   W̄ = C₁₀ (Ī₁ − 3) + C₀₁ (Ī₂ − 3) + C₂₀ (Ī₁ − 3)² + C₃₀ (Ī₁ − 3)³ with the neo-Hookean volume; their fictitious stress and
 //!   elasticity from Holzapfel 2000, eqs. 6.193 and 6.168 ([`MaterialModel::Polynomial`]).
 //! - **J2 plasticity** ([`crate::elastoplastic`]): Simo's multiplicative plasticity with the
-//!   exponential return map in the principal logarithmic strains (finite strain), or the
+//!   exponential return map in the principal logarithmic strains (isotropic hardening),
+//!   Lagrangian logarithmic-strain return (finite kinematic hardening), or the
 //!   additive radial return (small strain, [`MaterialModel::small_strain`]); decoupled too, the
 //!   return deviatoric and the Hencky volume K/2 (ln J)².
 
@@ -111,7 +112,7 @@ pub fn push_forward(f: &Mat3) -> Tangent {
 }
 
 /// T C Tᵀ.
-fn sandwich(t: &Tangent, c: &Tangent) -> Tangent {
+pub(crate) fn sandwich(t: &Tangent, c: &Tangent) -> Tangent {
     let mut tc = [[0.0; 6]; 6];
     for a in 0..6 {
         for b in 0..6 {

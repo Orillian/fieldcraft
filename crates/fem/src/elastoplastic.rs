@@ -31,10 +31,11 @@
 //! tangent is symmetric for isotropic hardening: 𝔻ᵉᵖ and the θ scaling share the principal
 //! frame.
 //!
-//! **Kinematic hardening at finite strain** is refused: a back stress is not coaxial with bₑ, so
-//! the principal-frame return no longer holds, and it needs a formulation of its own (for
-//! example the Lagrangian logarithmic strain space of C. Miehe, N. Apel, M. Lambrecht, CMAME
-//! 191:5383–5425, 2002). It works with small strain.
+//! **Kinematic hardening at finite strain** uses the Lagrangian logarithmic strain
+//! E = ½ ln(FᵀF), with additive plastic strain and back stress in the reference frame
+//! (C. Miehe, N. Apel, M. Lambrecht, CMAME 191:5383–5425, 2002). The full tensor return
+//! is shared with small strain. First and second derivatives of the logarithm map its
+//! conjugate stress and consistent tangent to the spatial interface.
 //!
 //! **Small strain** (Simo & Hughes 1998, §3.3): ε = εₑ + εₚ additively, the history the plastic
 //! strain εₚ, the back stress α and the equivalent plastic strain; the trial εₑ = ε − εₚ,ₙ goes
@@ -46,14 +47,17 @@
 //! split is exact.
 //!
 //! **History layout** per integration point ([`HISTORY`] values): 0–5 Cₚ⁻¹ − I (finite strain,
-//! tensor components) or εₚ (small strain, engineering shears), 6–11 the back stress α, 12 the
-//! equivalent plastic strain.
+//! isotropic hardening, tensor components) or Eₚ (finite kinematic hardening) / εₚ (small strain),
+//! with engineering shears in both additive cases; 6–11 the back stress α, 12 the equivalent
+//! plastic strain.
 
 use crate::constitutive::{Response, Tangent};
 use crate::dense::{inverse3, symmetric_eigen};
 use crate::plasticity::{J2, PointState, Return};
 use crate::rotation::{IDENTITY, Mat3, mul, tensor, transpose, voigt};
 use crate::{Error, Result};
+
+mod logarithmic;
 
 /// History values per integration point.
 pub const HISTORY: usize = 13;
@@ -117,10 +121,7 @@ fn trial_deviator(j2: &J2, e: &[f64; 6]) -> [f64; 6] {
 /// response.
 pub fn finite_isochoric(j2: &J2, f: &Mat3, temperature: Option<f64>, committed: &[f64], updated: &mut [f64]) -> Result<Response> {
     if let Some(crate::plasticity::Flow::Linear { kinematic: true, .. }) = j2.flow {
-        return Err(Error::NotSupported(
-            "kinematic hardening at finite strain (its back stress is not coaxial with the elastic stretch; use nonlinear_geometry false or isotropic hardening)"
-                .into(),
-        ));
+        return logarithmic::isochoric(j2, f, temperature, committed, updated);
     }
     let b = mul(&mul(f, &plastic_stretch(committed)), &transpose(f));
     let (l, q) = symmetric_eigen(&b)
@@ -331,6 +332,135 @@ mod tests {
         assert!(rest.stress.iter().all(|v| *v == 0.0));
     }
 
+    #[test]
+    fn finite_kinematic_tangent_with_noncoaxial_history_and_repeated_stretches() {
+        let m = bilinear(2000.0, Hardening::Kinematic);
+        let mut prior = [0.0; HISTORY];
+        finite(&m, &[[1.1, 0.12, 0.0], [0.0, 0.95, 0.03], [0.0, 0.0, 0.96]], &[0.0; HISTORY], &mut prior);
+        assert!(prior[PLASTIC_STRAIN] > 0.0 && prior[9].abs() > 1.0);
+        for f in [
+            IDENTITY,
+            [[1.0001, 0.0002, 0.0], [0.0, 0.9999, 0.0], [0.0, 0.0, 1.0]],
+            [[1.3, 0.15, -0.05], [-0.1, 0.85, 0.2], [0.07, -0.12, 1.05]],
+            [[1.2, 0.0, 0.0], [0.0, 0.92, 0.0], [0.0, 0.0, 0.92]],
+            [[1.0, 5.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        ] {
+            for committed in [&[0.0; HISTORY][..], &prior[..]] {
+                let worst = check_finite_tangent(&m, &f, committed);
+                assert!(worst < 1e-7, "{f:?}, {committed:?}: {worst}");
+                let r = finite(&m, &f, committed, &mut [0.0; HISTORY]);
+                for a in 0..6 {
+                    for b in 0..6 {
+                        assert!((r.tangent[a][b] - r.tangent[b][a]).abs() < 1e-9 * E);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finite_kinematic_is_objective_and_rejects_invalid_input_atomically() {
+        let m = bilinear(2000.0, Hardening::Kinematic);
+        let f = [[1.3, 0.15, -0.05], [-0.1, 0.85, 0.2], [0.07, -0.12, 1.05]];
+        let mut history = [0.0; HISTORY];
+        finite(&m, &f, &[0.0; HISTORY], &mut history);
+        let rotation = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut u = history;
+        let mut v = history;
+        let a = finite(&m, &f, &history, &mut u);
+        let b = finite(&m, &mul(&rotation, &f), &history, &mut v);
+        let expected = crate::rotation::rotate(&rotation, &a.stress);
+        let tangent = crate::constitutive::sandwich(&push_forward(&rotation), &a.tangent);
+        for k in 0..6 {
+            assert!((b.stress[k] - expected[k]).abs() < 1e-10 * E);
+            for l in 0..6 {
+                assert!((b.tangent[k][l] - tangent[k][l]).abs() < 1e-10 * E);
+            }
+        }
+        for k in 0..HISTORY {
+            assert!((u[k] - v[k]).abs() < 1e-12);
+        }
+        for bad in [
+            [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[0.0; 3]; 3],
+            [[f64::NAN; 3]; 3],
+            [[1e200; 3]; 3],
+            // Positive determinant, but the logarithm's derivatives overflow after the return.
+            [[1e-150, 0.0, 0.0], [0.0, 1e75, 0.0], [0.0, 0.0, 1e75]],
+        ] {
+            let mut updated = history;
+            assert!(finite_isochoric(&m, &bad, None, &history, &mut updated).is_err());
+            assert_eq!(updated, history);
+        }
+    }
+
+    #[test]
+    fn logarithmic_elastic_limit_and_simple_shear_match_closed_forms() {
+        let m = j2(Plastic::Bilinear { yield_stress: 1e12, hardening_modulus: 2000.0, hardening: Hardening::Kinematic });
+        let rest = finite(&m, &IDENTITY, &[0.0; HISTORY], &mut [0.0; HISTORY]);
+        assert_eq!(rest.stress, [0.0; 6]);
+        let linear = crate::material::isotropic(E, NU).unwrap();
+        for a in 0..6 {
+            for b in 0..6 {
+                assert!((rest.tangent[a][b] - linear[a][b]).abs() < 1e-12 * E);
+            }
+        }
+        // Hencky elasticity: E = ½ log(FᵀF), τ = 2G log(V), J = 1.
+        for gamma in [1e-8, 0.1, 1.0, 3.0, 5.0] {
+            let f = [[1.0, gamma, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+            let mut history = [0.0; HISTORY];
+            let r = finite(&m, &f, &[0.0; HISTORY], &mut history);
+            let exact = 4.0 * m.shear * (gamma / 2.0).asinh() / (gamma * gamma + 4.0).sqrt();
+            assert!((r.stress[3] - exact).abs() < 1e-12 * E);
+            assert_eq!(history, [0.0; HISTORY]);
+        }
+    }
+
+    /// Itskov (2005), Trends and Applications of Mathematics to Mechanics, pp. 101–113,
+    /// doi:10.1007/88-470-0354-7_10, eq. (60), Fig. 1, r = 0: the rigid-perfect-plastic
+    /// simple-shear curve of additive logarithmic plasticity. H = 0 recovers that published
+    /// curve; for Prager hardening, α = (2/3) H E_p adds the Hencky term as E_p → E.
+    #[test]
+    fn noncoaxial_shear_converges_to_itskovs_published_curve() {
+        let yield_stress = 250.0;
+        for hardening_modulus in [0.0, 2000.0] {
+            let mut errors = Vec::new();
+            for steps in [2000, 4000] {
+                // Refine both limits: finite elasticity leaves an O((Y + H)/E) offset
+                // from the published rigid-plastic curve, even at vanishing step size.
+                let young = 2e8 * (steps as f64 / 2000.0).powi(2);
+                let m = J2::from_model(
+                    &fieldcraft_model::Elastic::Isotropic { young, poisson: NU },
+                    Some(&Plastic::Bilinear { yield_stress, hardening_modulus, hardening: Hardening::Kinematic }),
+                    None,
+                )
+                .unwrap();
+                let mut committed = [0.0; HISTORY];
+                let mut error: f64 = 0.0;
+                for step in 1..=steps {
+                    let gamma = 10.0 * step as f64 / steps as f64;
+                    let f = [[1.0, gamma, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+                    let mut updated = committed;
+                    let r = finite(&m, &f, &committed, &mut updated);
+                    if step % (steps / 40) == 0 {
+                        let s = gamma * gamma + 4.0;
+                        let e = (gamma / 2.0).asinh();
+                        let perfect = yield_stress / 3.0f64.sqrt() * 2.0 * (s + 4.0 * e * e).sqrt() / s;
+                        let prager = 4.0 * hardening_modulus * e / (3.0 * s.sqrt());
+                        let reference = perfect + prager;
+                        error = error.max((r.stress[3] - reference).abs() / reference);
+                    }
+                    committed = updated;
+                }
+                eprintln!("Itskov shear H={hardening_modulus}, {steps} steps: max relative error {error}");
+                let band = (10.0 / steps as f64).powi(2) + 2.0 * (yield_stress + hardening_modulus) / young;
+                assert!(error < band, "H={hardening_modulus}, {steps} steps: {error} vs {band}");
+                errors.push(error);
+            }
+            assert!(errors[1] < 0.6 * errors[0], "step and rigidity refinement: {errors:?}");
+        }
+    }
+
     /// Uniaxial stress along x at finite strain, from a virgin point to a logarithmic strain ε
     /// in one increment (the lateral stretch found so σ_yy = 0): the Kirchhoff stress is the
     /// small-strain curve in the logarithmic strain, τ = σ_y + E_t (ε − σ_y/E), because the
@@ -392,8 +522,7 @@ mod tests {
                 }
             }
         }
-        // Kinematic hardening is refused at finite strain, named.
-        assert!(matches!(finite_isochoric(&m, &IDENTITY, None, &[0.0; HISTORY], &mut [0.0; HISTORY]), Err(Error::NotSupported(_))));
+        assert!(finite_isochoric(&m, &IDENTITY, None, &[0.0; HISTORY], &mut [0.0; HISTORY]).is_ok());
     }
 
     #[test]

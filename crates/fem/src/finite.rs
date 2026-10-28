@@ -889,18 +889,30 @@ mod tests {
     /// really plastic.
     #[test]
     fn plastic_tangents_are_the_derivative_of_the_forces() {
+        for hardening in [fieldcraft_model::Hardening::Isotropic, fieldcraft_model::Hardening::Kinematic] {
+            check_plastic_solid_tangents(hardening);
+        }
+    }
+
+    fn check_plastic_solid_tangents(hardening: fieldcraft_model::Hardening) {
         use crate::elastoplastic::{HISTORY, PLASTIC_STRAIN};
-        use fieldcraft_model::{Elastic, Hardening, Plastic};
+        use fieldcraft_model::{Elastic, Plastic};
         let j2 = crate::plasticity::J2::from_model(
             &Elastic::Isotropic { young: 1000.0, poisson: 0.3 },
-            Some(&Plastic::Bilinear { yield_stress: 5.0, hardening_modulus: 50.0, hardening: Hardening::Isotropic }),
+            Some(&Plastic::Bilinear { yield_stress: 5.0, hardening_modulus: 50.0, hardening }),
             None,
         )
         .unwrap();
         let m = MaterialModel::Plastic(std::sync::Arc::new(j2));
         let (x20, x10) = (hex20(), tet10());
         let x8: Vec<[f64; 3]> = x20[..8].to_vec();
+        let x4 = x10[..4].to_vec();
+        let x6 = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]];
         for (kind, x, f) in [
+            (ElementKind::Tet4, &x4, Formulation::Full),
+            (ElementKind::Wedge6, &x6, Formulation::Full),
+            (ElementKind::Hex20, &x20, Formulation::Full),
+            (ElementKind::Tet10, &x10, Formulation::Hybrid { pressures: 1 }),
             (ElementKind::Hex8, &x8, Formulation::Full),
             (ElementKind::Tet10, &x10, Formulation::Full),
             (ElementKind::Hex20, &x20, Formulation::Reduced),
@@ -928,11 +940,17 @@ mod tests {
 
     #[test]
     fn plastic_plane_strain_and_axisymmetric_tangents_are_the_derivative_of_the_forces() {
+        for hardening in [fieldcraft_model::Hardening::Isotropic, fieldcraft_model::Hardening::Kinematic] {
+            check_plastic_plane_tangents(hardening);
+        }
+    }
+
+    fn check_plastic_plane_tangents(hardening: fieldcraft_model::Hardening) {
         use crate::elastoplastic::{HISTORY, PLASTIC_STRAIN};
-        use fieldcraft_model::{Elastic, Hardening, Plastic};
+        use fieldcraft_model::{Elastic, Plastic};
         let j2 = crate::plasticity::J2::from_model(
             &Elastic::Isotropic { young: 1000.0, poisson: 0.3 },
-            Some(&Plastic::Bilinear { yield_stress: 5.0, hardening_modulus: 50.0, hardening: Hardening::Isotropic }),
+            Some(&Plastic::Bilinear { yield_stress: 5.0, hardening_modulus: 50.0, hardening }),
             None,
         )
         .unwrap();
@@ -984,6 +1002,55 @@ mod tests {
             stress.nonlinear(&m, &[[0.0; 2]; 4], Kinematics::Small, None, &[0.0; 4 * HISTORY], &mut [0.0; 4 * HISTORY], true),
             Err(Error::NotSupported(_))
         ));
+    }
+
+    #[test]
+    fn logarithmic_kinematic_simple_shear_is_smooth_and_step_convergent() {
+        use crate::elastoplastic::{HISTORY, PLASTIC_STRAIN};
+        use fieldcraft_model::{Elastic, Hardening, Plastic};
+        let j2 = crate::plasticity::J2::from_model(
+            &Elastic::Isotropic { young: 200_000.0, poisson: 0.3 },
+            Some(&Plastic::Bilinear { yield_stress: 250.0, hardening_modulus: 2000.0, hardening: Hardening::Kinematic }),
+            None,
+        )
+        .unwrap();
+        let m = MaterialModel::Plastic(std::sync::Arc::new(j2));
+        let x: Vec<_> = crate::shape::HEX_CORNERS.iter().map(|p| p.map(|v| 0.5 * (v + 1.0))).collect();
+        let solid = Solid::new(ElementKind::Hex8, &x, Formulation::Full).unwrap();
+        let mut terminal = Vec::new();
+        for steps in [50, 100, 200] {
+            let mut committed = vec![0.0; 8 * HISTORY];
+            let mut curve = Vec::new();
+            for step in 1..=steps {
+                let gamma = 5.0 * step as f64 / steps as f64;
+                let u: Vec<_> = x.iter().map(|p| [gamma * p[1], 0.0, 0.0]).collect();
+                let mut updated = committed.clone();
+                let (element, points) = solid.nonlinear_points(&m, &u, Kinematics::Finite, None, &committed, &mut updated, false).unwrap();
+                let shear = points[0].1.stress[3];
+                for (_, r) in &points {
+                    assert!((r.stress[3] - shear).abs() < 1e-8);
+                    assert!((r.stress[0] + r.stress[1] + r.stress[2]).abs() < 1e-8, "isochoric");
+                }
+                for axis in 0..3 {
+                    assert!(element.force.as_chunks::<3>().0.iter().map(|f| f[axis]).sum::<f64>().abs() < 1e-8, "balanced forces");
+                }
+                assert!(updated[PLASTIC_STRAIN] >= committed[PLASTIC_STRAIN]);
+                if steps == 50 && step == steps {
+                    check_tangent_from(&solid, &m, &u, Kinematics::Finite, &committed, 1e-6);
+                }
+                curve.push(shear);
+                committed = updated;
+            }
+            // The logarithmic model peaks smoothly, then decreases; monotonicity to γ = 5
+            // is not a property even of its elastic Hencky limit.
+            let peak = curve.iter().enumerate().max_by(|(_, a), (_, b)| a.total_cmp(b)).unwrap().0;
+            assert!((2.6..2.9).contains(&(5.0 * (peak + 1) as f64 / steps as f64)));
+            assert!(curve[..=peak].windows(2).all(|w| w[1] >= w[0]));
+            assert!(curve[peak..].windows(2).all(|w| w[1] <= w[0]));
+            terminal.push(*curve.last().unwrap());
+        }
+        assert!((terminal[2] - terminal[1]).abs() < (terminal[1] - terminal[0]).abs());
+        assert!((terminal[2] - 870.981_087_088_643).abs() < 1e-3);
     }
 
     /// A temperature field: the tangent is the derivative of the forces (finite and small strain,

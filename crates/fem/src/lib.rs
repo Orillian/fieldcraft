@@ -39,7 +39,8 @@
 //! - [`rotation`]: incrementally objective stress updates (Hughes–Winget Jaumann, Flanagan–Taylor
 //!   Green–Naghdi);
 //! - [`elastoplastic`]: J2 plasticity at a material point of implicit analysis, at finite strain
-//!   (Simo's exponential map in the principal logarithmic strains) and at small strain, with the
+//!   (Simo's exponential map for isotropic hardening, Lagrangian logarithmic strain for
+//!   kinematic hardening) and at small strain, with the
 //!   consistent tangents, on the radial return of [`plasticity`];
 //! - [`plasticity`]: J2 radial return with isotropic, kinematic and Johnson–Cook hardening,
 //!   Johnson–Cook damage;
