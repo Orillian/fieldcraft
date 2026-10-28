@@ -1,0 +1,33 @@
+# Publishing the latest release runs pages.yml on `main`, which puts its .flatpak into the Flatpak
+# repository on Pages (docs/releasing.md, "Flatpak repository"). A release event runs on the tag,
+# and only `main` may deploy Pages, hence the dispatch.
+# After SolidCraft's flatpak-pages.yml (MIT OR Apache-2.0; see ATTRIBUTION.md).
+name: Flatpak repository
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  pages:
+    name: Deploy Pages with the new release
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Run pages.yml on main
+        run: |
+          latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)"
+          if [ "$latest" != "$TAG" ]; then
+            echo "::notice::$TAG is not the latest release ($latest): the Flatpak repository keeps $latest"
+            exit 0
+          fi
+          gh workflow run pages.yml --ref main
+          echo "Started pages.yml on main for $TAG" >>"$GITHUB_STEP_SUMMARY"

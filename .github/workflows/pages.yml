@@ -1,19 +1,26 @@
 # The documentation site on GitHub Pages: the book (docs/, `cargo xtask book`) at
-# https://tangency-labs.github.io/fieldcraft/ and the web app (apps/fieldcraft-web, docs/web.md) at
-# https://tangency-labs.github.io/fieldcraft/app/. After SolidCraft's pages.yml (MIT OR Apache-2.0;
-# see ATTRIBUTION.md).
+# https://tangency-labs.github.io/fieldcraft/, the web app (apps/fieldcraft-web, docs/web.md) at
+# https://tangency-labs.github.io/fieldcraft/app/ and the Flatpak repository of the latest
+# published release (packaging/flatpak-site.sh) at https://tangency-labs.github.io/fieldcraft/flatpak/.
+# After SolidCraft's pages.yml (MIT OR Apache-2.0; see ATTRIBUTION.md).
 #
 # A push to `main` (a release; main holds released code only) builds the book and the app (Trunk,
 # release, wasm-opt) and deploys them. A merge to `develop` builds both without deploying, so a
 # broken book or web build shows up before the release. A manual run builds the branch it runs on and
-# deploys only from `main`. Needs Settings › Pages › Source = GitHub Actions, and `main` allowed
-# by the github-pages environment's deployment branches.
+# deploys only from `main`; publishing a release starts one there (flatpak-pages.yml, and
+# docs/releasing.md, "Flatpak repository"). Needs Settings › Pages › Source = GitHub Actions, and
+# `main` allowed by the github-pages environment's deployment branches.
 name: Pages
 
 on:
   push:
     branches: [main, develop]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Published release for the Flatpak repository (empty: the latest)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -29,6 +36,7 @@ env:
   TRUNK_SHA256: f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
   MDBOOK_VERSION: v0.5.4
   MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+  PAGES_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
 
 jobs:
   build:
@@ -84,13 +92,56 @@ jobs:
           cp -r target/book/. site/
           cp -r dist/web site/app
       - if: github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          name: site
           path: site
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
 
-  deploy:
+  # The Flatpak repository (packaging/flatpak-site.sh). The signing key FLATPAK_GPG_KEY reaches only
+  # this job, which runs on a fresh runner, adds nothing to PATH and runs no code but ours and
+  # Ubuntu's packages: no Rust toolchain, no cargo, no build scripts. It does not need the site, only
+  # makes site-flatpak/flatpak/ for `deploy` to add.
+  flatpak:
+    name: Flatpak repository
     if: github.ref == 'refs/heads/main'
-    needs: build
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.flatpak.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the Flatpak repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak ostree minisign
+      - name: Make the Flatpak repository
+        id: flatpak
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          # Optional (docs/releasing.md, "Flatpak repository"); without it the repository is unsigned.
+          FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+        run: packaging/flatpak-site.sh site-flatpak
+      - if: steps.flatpak.outputs.tag != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site-flatpak
+          path: site-flatpak
+          if-no-files-found: error
+          retention-days: 1
+
+  # Deploys whenever the site built, with the Flatpak repository when the `flatpak` job made one.
+  # When that job fails the deploy has no /flatpak/ (each deploy replaces the whole site), so
+  # `flatpak update` finds no repository until a run succeeds again; the docs and the app still go out.
+  deploy:
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build.result == 'success' }}
+    needs: [build, flatpak]
     runs-on: ubuntu-24.04
     permissions:
       pages: write
@@ -99,5 +150,55 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+          path: site
+      - if: needs.flatpak.result == 'success' && needs.flatpak.outputs.tag != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site-flatpak
+          path: site
+      - name: Warn when the Flatpak repository is left out
+        if: needs.flatpak.result != 'success'
+        env:
+          RESULT: ${{ needs.flatpak.result }}
+        run: echo "::warning::The Flatpak repository job did not succeed ($RESULT), so this deploy has no /flatpak/"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # After a deploy that a published release started (flatpak-pages.yml) or a manual run: install
+  # FieldCraft from the published repository as a user would, with the runtime from Flathub, and
+  # run both programs. A push to main keeps the release that was already checked.
+  flatpak-check:
+    name: Install from the Flatpak repository
+    needs: [flatpak, deploy]
+    if: needs.flatpak.outputs.tag != '' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.flatpak.outputs.tag }}
+    steps:
+      - name: Install flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak
+          # Ubuntu 24.04's AppArmor blocks the unprivileged user namespaces bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install FieldCraft from the repository and run it
+        run: |
+          app=io.github.tangencylabs.fieldcraft
+          # Pages caches files for up to 10 minutes: wait until the new release is served.
+          for _ in $(seq 40); do
+            if curl -fsSL "$PAGES_BASE_URL/flatpak/index.html" | grep -qF ">$TAG<"; then break; fi
+            sleep 20
+          done
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive "$PAGES_BASE_URL/flatpak/fieldcraft.flatpakref"
+          test "$(flatpak run --command=fieldcraft-cli "$app" --version)" = "fieldcraft-cli ${TAG#v}"
+          flatpak run "$app" --version
+          flatpak info --user "$app"
+          echo "Installed and ran FieldCraft $TAG from $PAGES_BASE_URL/flatpak/" >>"$GITHUB_STEP_SUMMARY"

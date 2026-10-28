@@ -122,14 +122,16 @@ The web build on Pages gets the key only when it runs from `main`: its build job
 ## Where the secrets live
 
 Every release secret (the `APPLE_*` secrets, `KEYCHAIN_PASSWORD`, `FIELDCRAFT_SIGNING_KEY`,
-`POSTHOG_KEY`) is a secret of the GitHub Environment `release`, whose deployment branches allow
+`POSTHOG_KEY`, `FLATPAK_GPG_KEY`) is a secret of the GitHub Environment `release`, whose deployment branches allow
 `main` only. Repository secrets are readable by any workflow a writer can run on any branch;
 environment secrets reach only jobs that name the environment and run from an allowed branch, so a
 contributor with write access cannot read the signing keys from a branch of their own. The jobs
-that read them (`release.yml`'s macos, linux, windows and release jobs, `pages.yml`'s build job)
+that read them (`release.yml`'s macos, linux, flatpak, windows and release jobs, `pages.yml`'s build job)
 ask for `release` only on `main`
 (`environment: ${{ github.ref == 'refs/heads/main' && 'release' || '' }}`); elsewhere the name is
-empty, the job runs in no environment, sees no secrets and builds unsigned. `.github/CODEOWNERS`
+empty, the job runs in no environment, sees no secrets and builds unsigned. `FLATPAK_GPG_KEY`
+reaches only `pages.yml`'s `flatpak` job, which runs on `main` only and builds no code
+([Flatpak repository](#flatpak-repository)). `.github/CODEOWNERS`
 keeps the workflows, packaging and updater under the owner's review.
 
 Moving them from repository secrets, once (the owner; each value comes from its own source file,
@@ -222,6 +224,70 @@ Publishing is a maintainer's call; an agent preparing a release stops at the dra
 5. Publish: `gh release edit v<version> -R tangency-labs/fieldcraft --draft=false --latest`
    (a release candidate: `--draft=false --prerelease --latest=false`). Publishing creates the tag
    at the draft's commit; never push release tags by hand.
+6. Once releases carry the Flatpak bundle, check the Flatpak repository took it: the `Flatpak
+   repository` run starts a `Pages` run on `main`, whose `Install from the Flatpak repository` job
+   installs the new version from Pages and runs it ([Flatpak repository](#flatpak-repository)).
+
+## Flatpak repository
+
+Pages serves a Flatpak repository with the latest published release (not pre-releases) at
+<https://tangency-labs.github.io/fieldcraft/flatpak/>, next to the book and the web app, once
+releases carry the bundle (below; until then the site has no repository). Users will install and
+update FieldCraft with:
+
+```sh
+flatpak install --user https://tangency-labs.github.io/fieldcraft/flatpak/fieldcraft.flatpakref
+flatpak update --user
+```
+
+(`fieldcraft.flatpakref` adds the remote `fieldcraft`; the freedesktop runtime comes from
+Flathub. `fieldcraft.flatpakrepo` adds the remote alone.) How it is made:
+
+- `release.yml` builds `fieldcraft-<v>-linux-x86_64.flatpak` (`packaging/linux/flatpak-bundle.sh`).
+  **Not yet in the release:** the job runs on every release run and dry run and uploads the bundle
+  as the `flatpak-x86_64` workflow artifact, but the `release` job neither waits for it nor
+  attaches it. Once a dry run (`gh workflow run release.yml --ref <branch>` on a branch of this
+  repository) has built it, a follow-up change adds `flatpak` to the `release` job's `needs`,
+  renames its artifact into `release-*`, adds the file to the set (so it is in `SHA256SUMS.txt`)
+  and adds the install lines to the release notes and the README.
+- Every Pages deploy (`pages.yml` on `main`) runs `packaging/flatpak-site.sh` in its own `flatpak`
+  job, the only one that gets `FLATPAK_GPG_KEY`: a fresh runner with Ubuntu's flatpak, ostree and
+  minisign, no Rust toolchain and nothing from the book or web build (which runs crates.io build
+  scripts). `deploy` adds its output to the `site` artifact of the `build` job. When the `flatpak`
+  job fails, the book and the web app still deploy, without `/flatpak/` (the run warns), so the
+  repository is missing until the next good run. The script downloads the latest published
+  release's bundle, checks `SHA256SUMS.txt.minisig` with the release key the app is built with (so
+  a release without `FIELDCRAFT_SIGNING_KEY` gets no repository) and the bundle against
+  `SHA256SUMS.txt`, imports it into a new OSTree repository under `flatpak/repo` and writes the
+  `.flatpakrepo`, the `.flatpakref` and an index page. Each deploy holds exactly one release, so a
+  docs-only deploy keeps the current one, and the size stays that of one release. Releases from
+  before the Flatpak have no bundle, and the site then has no repository.
+- Publishing a release starts `flatpak-pages.yml`, which runs `pages.yml` on `main` again when
+  the release is the latest. A release event runs on its tag, and only `main` may deploy Pages.
+  A release published by a workflow's `GITHUB_TOKEN` starts no workflows; a maintainer publishing
+  it (on the page, or `gh release edit` as above) does.
+- After a deploy that publishing (or a manual run) started, `pages.yml`'s `flatpak-check` job
+  waits until Pages serves the new release (its cache keeps files up to 10 minutes), installs
+  FieldCraft from the `.flatpakref` on a clean runner and runs both programs.
+
+To put a chosen published release in (going back after a bad release, say):
+`gh workflow run pages.yml -R tangency-labs/fieldcraft --ref main -f release_tag=v<version>`.
+
+**Signing (optional).** With the `release` environment secret `FLATPAK_GPG_KEY` (an
+ASCII-armored GPG secret key without a passphrase), the commits and the repository summary are
+signed and the `.flatpakrepo` and `.flatpakref` carry the public key, so clients verify what they
+download. Without it the repository is unsigned (the run warns): clients add it with GPG
+verification off and rely on HTTPS. Setting it up, once (the owner):
+
+```sh
+export GNUPGHOME="$(mktemp -d)"
+gpg --batch --passphrase '' --quick-gen-key "FieldCraft Flatpak repository" rsa4096 sign never
+gpg --batch --armor --export-secret-keys | gh secret set FLATPAK_GPG_KEY --env release -R tangency-labs/fieldcraft
+```
+
+Keep an offline copy of the key and delete `$GNUPGHOME`. Remotes added before the key existed
+stay unsigned until users add the repository again (`flatpak remote-delete --user fieldcraft`,
+then install from the `.flatpakref`); the same goes for a new key after a rotation.
 
 ## Dry runs
 
