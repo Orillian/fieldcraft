@@ -21,7 +21,7 @@ fn each(values: &mut [f64], q: Q, f: &mut dyn FnMut(Q, &mut f64)) {
 
 impl Quantities for Material {
     fn quantities(&mut self, f: &mut dyn FnMut(Q, &mut f64)) {
-        let Material { elastic, hyperelastic, density, fluid, plastic, damage, erosion, thermal, pvt } = self;
+        let Material { elastic, hyperelastic, density, fluid, plastic, damage, erosion, thermal, pvt, phase_change } = self;
         match elastic {
             Some(Elastic::Isotropic { young, poisson: _ }) => f(Q::Pressure, young),
             Some(Elastic::EngineeringConstants { young, poisson: _, shear }) => {
@@ -122,6 +122,11 @@ impl Quantities for Material {
             f(Q::SpecificVolume, b7);
             f(Q::ThermalExpansion, b8);
             f(Q::InversePressure, b9);
+        }
+        if let Some(PhaseChange { latent_heat, solidus, liquidus }) = phase_change {
+            f(Q::SpecificEnergy, latent_heat);
+            f(Q::Temperature, solidus);
+            f(Q::Temperature, liquidus);
         }
     }
 }

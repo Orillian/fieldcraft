@@ -83,6 +83,7 @@ const TABLE: &[Row] = {
         (Q::TemperaturePerPressure, ["K/Pa", "K/MPa", "K/GPa", "K/MPa", "°F/psi"]),
         (Q::ThermalConductivity, ["W/(m·K)", "mW/(mm·K)", "kW/(mm·K)", "W/(mm·K)", "lbf/(s·°F)"]),
         (Q::SpecificHeat, ["J/(kg·K)", "mJ/(t·K)", "J/(kg·K)", "mJ/(g·K)", "in²/(s²·°F)"]),
+        (Q::SpecificEnergy, ["J/kg", "mJ/t", "J/kg", "mJ/g", "in²/s²"]),
         (Q::HeatTransferCoefficient, ["W/(m²·K)", "mW/(mm²·K)", "kW/(mm²·K)", "W/(mm²·K)", "lbf/(in·s·°F)"]),
         (Q::ThermalContactResistance, ["m²·K/W", "mm²·K/mW", "mm²·K/kW", "mm²·K/W", "in·s·°F/lbf"]),
         (Q::HeatFlux, ["W/m²", "mW/mm²", "kW/mm²", "W/mm²", "lbf/(in·s)"]),

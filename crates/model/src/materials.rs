@@ -564,6 +564,33 @@ pub struct Erosion {
     pub plastic_strain: f64,
 }
 
+/// Melting and freezing: the latent heat released between the liquidus and the solidus, over
+/// which the liquid fraction falls from 1 to 0 (linearly in temperature; an equal solidus and
+/// liquidus is a pure substance's isothermal front). A fluid domain of the material stops
+/// flowing where it has frozen (lattice Boltzmann, `fieldcraft_lbm::flow`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseChange {
+    /// Latent heat L (energy per mass) of melting.
+    pub latent_heat: f64,
+    /// Below it the material is solid (kelvin).
+    pub solidus: f64,
+    /// Above it the material is liquid (kelvin); at least the solidus.
+    pub liquidus: f64,
+}
+
+impl PhaseChange {
+    pub fn validate(&self) -> Result<()> {
+        positive("latent heat", self.latent_heat)?;
+        finite("solidus", self.solidus)?;
+        finite("liquidus", self.liquidus)?;
+        if !(self.liquidus >= self.solidus) {
+            return Err(Error::Invalid(format!("the liquidus {} is below the solidus {}", self.liquidus, self.solidus)));
+        }
+        Ok(())
+    }
+}
+
 /// A material.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -595,6 +622,9 @@ pub struct Material {
     /// two-domain Tait equation of a polymer ([`Pvt::evaluate`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pvt: Option<Pvt>,
+    /// Latent heat of melting and freezing (needs a specific heat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_change: Option<PhaseChange>,
 }
 
 impl Material {
@@ -657,6 +687,12 @@ impl Material {
         }
         if let Some(p) = &self.pvt {
             p.validate()?;
+        }
+        if let Some(p) = &self.phase_change {
+            p.validate()?;
+            if self.thermal.and_then(|t| t.specific_heat).is_none() {
+                return Err(Error::Invalid("a phase change needs the material's specific heat".into()));
+            }
         }
         Ok(())
     }
@@ -910,6 +946,32 @@ mod tests {
         assert!(serde_json::from_str::<Material>(r#"{"density":1,"plastic":{"type":"bilinear","yield_stress":1,"oops":2}}"#).is_err());
         let text = serde_json::to_string(&Material { plastic: Some(jc()), damage: Some(damage), ..steel() }).unwrap();
         assert_eq!(serde_json::from_str::<Material>(&text).unwrap(), Material { plastic: Some(jc()), damage: Some(damage), ..steel() });
+    }
+
+    #[test]
+    fn a_phase_change_needs_a_specific_heat_and_ordered_temperatures() {
+        let m: Material = serde_json::from_value(serde_json::json!({
+            "density": 2700, "thermal": {"conductivity": 200, "specific_heat": 900},
+            "phase_change": {"latent_heat": 3.9e5, "solidus": 900, "liquidus": 933}
+        }))
+        .unwrap();
+        m.validate().unwrap();
+        let back: Material = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        let p = m.phase_change.unwrap();
+        let pure = PhaseChange { liquidus: p.solidus, ..p };
+        assert!(Material { phase_change: Some(pure), ..m.clone() }.validate().is_ok(), "an isothermal front");
+        for bad in [
+            PhaseChange { liquidus: 800.0, ..p },
+            PhaseChange { latent_heat: 0.0, ..p },
+            PhaseChange { latent_heat: f64::NAN, ..p },
+            PhaseChange { solidus: f64::INFINITY, ..p },
+        ] {
+            assert!(Material { phase_change: Some(bad), ..m.clone() }.validate().is_err(), "{bad:?}");
+        }
+        let no_heat = Material { thermal: Some(Thermal { specific_heat: None, ..m.thermal.unwrap() }), ..m.clone() };
+        assert!(no_heat.validate().is_err(), "needs a specific heat");
+        assert!(serde_json::from_value::<Material>(serde_json::json!({"density": 1, "phase_change": {"latent_heat": 1}})).is_err());
     }
 
     #[test]
