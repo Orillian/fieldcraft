@@ -12,6 +12,8 @@
 #
 #   macOS universal (arm64 + x86_64)   .dmg with FieldCraft.app, the CLI as a .zip   packaging/macos
 #   Linux x86_64 (glibc 2.35+)         .tar.gz, .AppImage, .deb and .rpm              packaging/linux
+#   Linux x86_64 Flatpak               .flatpak (built from source, freedesktop 26.08) packaging/linux/flatpak
+#                                      (a workflow artifact only, not yet in the release: see the job)
 #   Windows x64                        .zip with fieldcraft.exe and fieldcraft-cli.exe packaging/windows
 #
 # macOS: signed with a Developer ID and notarized when the APPLE_* secrets exist, ad-hoc
@@ -280,6 +282,50 @@ jobs:
         with:
           name: release-linux-x86_64
           path: dist/release/*
+          if-no-files-found: error
+
+  # Not yet part of the release: the `release` job neither waits for it nor attaches its bundle
+  # (the artifact name is outside `release-*`) until a dry run has built it, so a failure here costs
+  # no draft and no signature. It runs on every release run and dry run, and uploads the bundle as
+  # the `flatpak-x86_64` workflow artifact (docs/releasing.md, "Flatpak repository").
+  flatpak:
+    name: Flatpak x86_64
+    needs: version
+    # Signing, notarization and analytics secrets live in the `release` environment, which only
+    # `main` may use; a dry run on another branch asks for no environment and builds unsigned.
+    environment: ${{ github.ref == 'refs/heads/main' && 'release' || '' }}
+    # 24.04 for a newer flatpak-builder than 22.04 ships. The Rust build runs inside
+    # flatpak-builder on the freedesktop SDK, so it has its own glibc and needs no old image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FIELDCRAFT_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The host's cargo vendors the crates and generates the licences; the build uses the SDK's.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-flatpak
+          # Release runs are rare: only release-branch runs keep a cache, so dry runs don't evict CI's.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          # Ubuntu 24.04's AppArmor blocks the unprivileged user namespaces bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Generate THIRD-PARTY-LICENSES.txt (fails when a crate's licence can't be resolved)
+        run: cargo xtask licences
+      - name: Build the bundle, install it and run it
+        env:
+          # The analytics project key (docs/privacy.md), built in; never printed.
+          FIELDCRAFT_POSTHOG_KEY: ${{ secrets.POSTHOG_KEY }}
+        run: packaging/linux/flatpak-bundle.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flatpak-x86_64
+          path: dist/release/*.flatpak
           if-no-files-found: error
 
   windows:
