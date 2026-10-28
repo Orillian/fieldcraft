@@ -619,6 +619,12 @@ impl GpuFlow {
                 r.fluid.name()
             )));
         }
+        if flow.phase_change() {
+            return Err(Error::Invalid(
+                "melting and freezing (a phase change in the fluid's material) are not on the GPU backend yet: solve on the CPU (`backend: \"cpu\"`)"
+                    .into(),
+            ));
+        }
         if let Some(zone) = flow.zones().first() {
             return Err(Error::Invalid(format!(
                 "the GPU backend does not step fans or porous zones yet (`{}`): solve on the CPU (`backend: \"cpu\"`)",

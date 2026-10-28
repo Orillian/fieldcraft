@@ -85,6 +85,26 @@
 //! that heat never stays in the fluid (counted, a held wall meeting a held inlet reported twice
 //! its heat in a heated channel, #675).
 //!
+//! # Melting and freezing
+//! With a phase change in the fluid's material the scalar lattice carries the total enthalpy in
+//! temperature units, `E = T + (L / c) f_l` (f_l the liquid fraction), instead of the temperature:
+//! the rest population's equilibrium becomes `E − T + w₀ T`, the others keep `w_q T (1 + 4 c_q·u)`,
+//! so the populations sum to `E`, their flux is `T u` and the diffusion acts on `T`, and the
+//! lattice solves `∂E/∂t + ∇·(T u) = ∇·(α ∇T)` with the latent heat released as the enthalpy
+//! falls, without a source term or an iteration (R. Huang, H. Wu, P. Cheng, *A new lattice
+//! Boltzmann model for solid–liquid phase change*, Int. J. Heat Mass Transfer 59:295–301, 2013;
+//! the enthalpy method of V. R. Voller, *Fast implicit finite-difference method for the analysis
+//! of phase change problems*, Numer. Heat Transfer B 17:155, 1990). The temperature and liquid
+//! fraction follow from `E` (`PhaseSetup::split`): solid below the solidus, liquid above the
+//! liquidus plus `L / c`, the liquid fraction linear in between (an isothermal front when solidus
+//! and liquidus are equal). Walls, inlets and the conjugate interface work on `T` as before (an
+//! inlet holds the enthalpy of its temperature). The flow stops where the fluid has frozen: each
+//! cell's velocity carries a Carman–Kozeny resistance `A (1 − f_l)² / (f_l³ + ε)` per step
+//! (V. R. Voller, C. Prakash, *A fixed grid numerical modelling methodology for convection–
+//! diffusion mushy region phase-change problems*, Int. J. Heat Mass Transfer 30:1709, 1987;
+//! [`MUSHY`]), taken implicitly as a porous zone's (Guo and Zhao), so a frozen cell holds still to
+//! a few parts in a million of the speed it would take and the mushy zone resists the flow.
+//!
 //! Obstacles that conduct heat carry their own temperature, conducted on their cells and coupled
 //! to this lattice through their faces (conjugate heat transfer, [`crate::conduction`]).
 //!
@@ -106,7 +126,7 @@ use crate::conduction::{Interface, Layout, SolidHeat};
 use crate::lattice::{C, Q, W, c, equilibrium, moving_wall, opposite};
 use crate::outlet::{Action, Outlets, Populations};
 use crate::rheology::{Clamp, Clamps, Rheology};
-use crate::setup::{MAX_LATTICE_SPEED, Obstacle, Setup, ZoneKind, ZoneSetup};
+use crate::setup::{MAX_LATTICE_SPEED, Obstacle, PhaseSetup, Setup, ZoneKind, ZoneSetup};
 use crate::voxel::{Grid, TriangleTree, voxelise};
 use crate::wall::Walls;
 use crate::{Error, Result};
@@ -259,6 +279,20 @@ fn neighbour(grid: &Grid, periodic: [bool; 3], fluid: &[bool], p: [usize; 3], ax
     fluid.get(cell).copied().unwrap_or(false).then_some(cell)
 }
 
+/// A cell's action: its zone's, with the resistance of its liquid fraction `liquid` (with a phase
+/// change) added where it is not wholly liquid.
+#[inline(always)]
+fn cell_action(zone: Option<&ZoneAction>, liquid: Option<f64>) -> Option<ZoneAction> {
+    let r = liquid.map_or(0.0, Phase::resistance);
+    if r > 0.0 {
+        let mut z = zone.copied().unwrap_or_default();
+        z.alpha += r;
+        Some(z)
+    } else {
+        zone.copied()
+    }
+}
+
 /// The velocity (with the half force) and the force per volume of a cell from its density `rho`
 /// and momentum `j`, with body acceleration `a` and its zone's action. Porous resistance depends
 /// on the velocity it defines, `u = (j + F/2)/ρ`; solving that quadratic exactly keeps strong
@@ -301,6 +335,73 @@ fn equilibrium_t(q: usize, t: f64, u: [f64; 3]) -> f64 {
     WT.get(q).copied().unwrap_or(0.0) * t * (1.0 + 4.0 * (cq[0] * u[0] + cq[1] * u[1] + cq[2] * u[2]))
 }
 
+/// The Carman–Kozeny constants `(A, ε)` of the resistance `A (1 − f_l)² / (f_l³ + ε)` per step
+/// (lattice units) that stops the flow where the fluid has frozen: a frozen cell's velocity is
+/// cut to about `2 ε / A` (2e-6; [`velocity_force`] gives `u = v / (1 + α / 2)` with `α = A / ε`)
+/// of what it would be, half-frozen fluid to 1/100, and the flow is barely touched above a liquid
+/// fraction of 0.95 (Voller and Prakash 1987).
+pub const MUSHY: (f64, f64) = (100.0, 1.0e-4);
+
+/// The fluid's melting and freezing on the temperature lattice (see the module notes).
+#[derive(Debug, Clone)]
+pub(crate) struct Phase {
+    rule: PhaseSetup,
+    /// Each cell's liquid fraction after the last step (1 in obstacle cells).
+    liquid: Vec<f64>,
+}
+
+impl PhaseSetup {
+    /// The temperature and the liquid fraction at total enthalpy `e` (temperature units).
+    fn split(&self, e: f64) -> (f64, f64) {
+        let (low, high) = (self.solidus, self.liquidus + self.latent);
+        if e <= low {
+            (e, 0.0)
+        } else if e >= high {
+            (e - self.latent, 1.0)
+        } else {
+            let f = (e - low) / (high - low);
+            (self.solidus + f * (self.liquidus - self.solidus), f)
+        }
+    }
+
+    /// The liquid fraction at temperature `t`: a fluid at its liquidus counts as liquid.
+    fn fraction(&self, t: f64) -> f64 {
+        if t >= self.liquidus {
+            1.0
+        } else if t <= self.solidus {
+            0.0
+        } else {
+            (t - self.solidus) / (self.liquidus - self.solidus)
+        }
+    }
+
+    /// The total enthalpy (temperature units) and the liquid fraction of the fluid at temperature
+    /// `t`.
+    fn at(&self, t: f64) -> (f64, f64) {
+        let f = self.fraction(t);
+        (t + self.latent * f, f)
+    }
+}
+
+impl Phase {
+    /// The flow resistance per step at liquid fraction `f` (none when liquid).
+    fn resistance(f: f64) -> f64 {
+        if f >= 1.0 {
+            return 0.0;
+        }
+        let (a, eps) = MUSHY;
+        let s = 1.0 - f;
+        a * s * s / (f * f * f + eps)
+    }
+}
+
+/// The scalar equilibrium of total enthalpy `e` at temperature `t`: the temperature's, with the
+/// latent part `E − T` on the rest population (`e = t` without a phase change).
+#[inline(always)]
+fn equilibrium_e(q: usize, e: f64, t: f64, u: [f64; 3]) -> f64 {
+    equilibrium_t(q, t, u) + if q == 0 { e - t } else { 0.0 }
+}
+
 /// The temperature lattice and what it needs (see the module notes).
 #[derive(Debug, Clone)]
 pub struct ThermalState {
@@ -333,6 +434,8 @@ pub struct ThermalState {
     conjugate: Vec<bool>,
     /// Whether the solids' temperatures stayed finite in the last step.
     solid_finite: bool,
+    /// The fluid's melting and freezing, when its material has a phase change.
+    phase: Option<Phase>,
 }
 
 impl ThermalState {
@@ -364,6 +467,11 @@ impl ThermalState {
     /// The conducting obstacles' cells and state, when there are any.
     pub fn solid(&self) -> Option<&SolidHeat> {
         self.solid.as_ref()
+    }
+
+    /// The total enthalpy at temperature `t`: `t` itself without a phase change.
+    fn enthalpy(&self, t: f64) -> f64 {
+        self.phase.as_ref().map_or(t, |p| p.rule.at(t).0)
     }
 
     /// Whether the open boundary sets every scalar population of `cell` after streaming (an
@@ -879,10 +987,24 @@ impl Flow {
                 let t_n = stride.checked_mul(QT).ok_or_else(|| Error::Limit("the grid is too large".into()))?;
                 let mut tg = filled(t_n, 0.0, "temperature populations")?;
                 let tg2 = Vec::new();
+                let t0 = ts.initial_temperature;
+                let (e0, f0) = ts.phase.map_or((t0, 1.0), |p| p.at(t0));
+                let phase = match ts.phase {
+                    None => None,
+                    Some(rule) => {
+                        let mut liquid = filled(n, 1.0, "liquid fractions")?;
+                        for (cell, f) in liquid.iter_mut().enumerate() {
+                            if fluid[cell] {
+                                *f = f0;
+                            }
+                        }
+                        Some(Phase { rule, liquid })
+                    }
+                };
                 for cell in 0..n {
                     if fluid[cell] {
                         for q in 0..QT {
-                            tg[q * stride + cell] = equilibrium_t(q, ts.initial_temperature, setup.initial_velocity);
+                            tg[q * stride + cell] = equilibrium_e(q, e0, t0, setup.initial_velocity);
                         }
                     }
                 }
@@ -929,6 +1051,7 @@ impl Flow {
                     solid,
                     conjugate,
                     solid_finite: true,
+                    phase,
                 };
                 (
                     Some(state),
@@ -1102,6 +1225,21 @@ impl Flow {
         self.cell_force.get(cell).copied().unwrap_or(self.acceleration)
     }
 
+    /// The liquid fraction of a cell, or `None` without a phase change.
+    pub fn liquid_fraction(&self, cell: usize) -> Option<f64> {
+        self.phase().and_then(|p| p.liquid.get(cell).copied())
+    }
+
+    /// Whether the fluid melts and freezes.
+    pub fn phase_change(&self) -> bool {
+        self.phase().is_some()
+    }
+
+    /// The fluid's phase change, when it has one.
+    fn phase(&self) -> Option<&Phase> {
+        self.thermal.as_ref().and_then(|t| t.phase.as_ref())
+    }
+
     /// The temperature of a cell (model units), or `None` without heat.
     pub fn temperature(&self, cell: usize) -> Option<f64> {
         self.thermal.as_ref().and_then(|t| t.temperature.get(cell).copied())
@@ -1144,9 +1282,13 @@ impl Flow {
                 *slot = value;
             }
             let u = velocities.get(cell).copied().unwrap_or([0.0; 3]);
+            let (e, f) = t.phase.as_ref().map_or((value, 1.0), |p| p.rule.at(value));
+            if let Some(slot) = t.phase.as_mut().and_then(|p| p.liquid.get_mut(cell)) {
+                *slot = f;
+            }
             for q in 0..QT {
                 if let Some(g) = t.g.get_mut(q * s + cell) {
-                    *g = equilibrium_t(q, value, u);
+                    *g = equilibrium_e(q, e, value, u);
                 }
             }
         }
@@ -1173,6 +1315,7 @@ impl Flow {
             + self.outlets.heap_bytes();
         if let Some(t) = &self.thermal {
             total += bytes(&t.g) + bytes(&t.g2) + bytes(&t.temperature) + bytes(&t.open) + bytes(&t.reset);
+            total += t.phase.as_ref().map_or(0, |p| bytes(&p.liquid));
         }
         total
     }
@@ -1326,7 +1469,7 @@ impl Flow {
             let (rho, u) = state(cell);
             let a = self.force_at(cell);
             let mut force = a.map(|c| rho * c);
-            if let Some(z) = self.action_at(cell) {
+            if let Some(z) = cell_action(self.action_at(cell), self.liquid_fraction(cell)) {
                 let speed = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
                 for k in 0..3 {
                     force[k] += z.push[k] - rho * (z.alpha + z.beta * speed) * u[k];
@@ -1355,7 +1498,8 @@ impl Flow {
             j[1] += fq * cq[1];
             j[2] += fq * cq[2];
         }
-        let (u, _) = velocity_force(rho, j, self.force_at(cell), self.action_at(cell));
+        let action = cell_action(self.action_at(cell), self.liquid_fraction(cell));
+        let (u, _) = velocity_force(rho, j, self.force_at(cell), action.as_ref());
         Some((rho, u))
     }
 
@@ -1454,6 +1598,7 @@ impl Flow {
         let (cell_nu_t, prandtl) = (&self.cell_nu_t, self.turbulent_prandtl);
         let Some(t) = &mut self.thermal else { return };
         let (wp, wm) = (t.omega_plus, t.omega_minus);
+        let phase = t.phase.as_ref();
         let mut blocks = cell_blocks(&mut t.g, s, n, block);
         parallel::for_each_mut(&mut blocks, |b, g| {
             let len = g.first().map_or(0, |d| d.len());
@@ -1462,10 +1607,12 @@ impl Flow {
                 if !fluid.get(cell).copied().unwrap_or(false) {
                     continue;
                 }
-                let mut temp = 0.0;
+                // the populations' sum: the temperature, or with a phase change the total enthalpy
+                let mut e = 0.0;
                 for q in 0..QT {
-                    temp += g.get(q).and_then(|d| d.get(i)).copied().unwrap_or(0.0);
+                    e += g.get(q).and_then(|d| d.get(i)).copied().unwrap_or(0.0);
                 }
+                let temp = phase.map_or(e, |p| p.rule.split(e).0);
                 let u = cell_u.get(cell).copied().unwrap_or([0.0; 3]);
                 // The cell's turbulent diffusivity α_t = ν_t / Pr_t raises τ_T by 4 α_t; τ_T⁺
                 // follows with Λ_T kept, and a single relaxation time stays single.
@@ -1482,7 +1629,7 @@ impl Flow {
                     _ => (wp, wm),
                 };
                 if let Some(x) = g.get_mut(0).and_then(|d| d.get_mut(i)) {
-                    *x -= wp * (*x - equilibrium_t(0, temp, u));
+                    *x -= wp * (*x - equilibrium_e(0, e, temp, u));
                 }
                 // the pairs (1, 2), (3, 4), (5, 6)
                 for q in [1, 3, 5] {
@@ -1601,9 +1748,10 @@ impl Flow {
             match held {
                 Some(value) => {
                     let u = cell_u.get(cell).copied().unwrap_or([0.0; 3]);
+                    let e = t.enthalpy(*value);
                     for q in 0..QT {
                         if let Some(x) = t.g2.get_mut(q * s + cell) {
-                            *x = equilibrium_t(q, *value, u);
+                            *x = equilibrium_e(q, e, *value, u);
                         }
                     }
                 }
@@ -1638,7 +1786,8 @@ impl Flow {
         finite
     }
 
-    /// The temperature of every fluid cell from its populations; false when one is not finite.
+    /// The temperature (and with a phase change the liquid fraction) of every fluid cell from its
+    /// populations; false when one is not finite.
     fn update_temperature(&mut self) -> bool {
         let n = self.n;
         let s = self.stride;
@@ -1649,13 +1798,17 @@ impl Flow {
             if !fluid.get(cell).copied().unwrap_or(false) {
                 continue;
             }
-            let mut temp = 0.0;
+            let mut e = 0.0;
             for q in 0..QT {
-                temp += t.g.get(q * s + cell).copied().unwrap_or(0.0);
+                e += t.g.get(q * s + cell).copied().unwrap_or(0.0);
             }
-            finite &= temp.is_finite();
+            finite &= e.is_finite();
+            let (temp, liquid) = t.phase.as_ref().map_or((e, 1.0), |p| p.rule.split(e));
             if let Some(slot) = t.temperature.get_mut(cell) {
                 *slot = temp;
+            }
+            if let Some(slot) = t.phase.as_mut().and_then(|p| p.liquid.get_mut(cell)) {
+                *slot = liquid;
             }
         }
         finite
@@ -1798,6 +1951,8 @@ impl Flow {
         let (cell_force, constant) = (&self.cell_force, self.acceleration);
         let (zone_of, actions) = (&self.zone_of, &self.actions);
         let walls = if self.wall_model { self.walls.as_ref() } else { None };
+        // field by field: the pass borrows other fields mutably
+        let liquid = self.thermal.as_ref().and_then(|t| t.phase.as_ref()).map(|p| &p.liquid[..]);
         parallel::chunks_mut(&mut self.gradient_u, block, |b, out| {
             let mut fq = [0.0; Q];
             for (i, slot) in out.iter_mut().enumerate() {
@@ -1811,7 +1966,8 @@ impl Flow {
                 }
                 let a = cell_force.get(cell).copied().unwrap_or(constant);
                 let zone = zone_of.get(cell).and_then(|z| actions.get(*z as usize));
-                if let Some(state) = cell_state(&mut fq, cell, a, walls, zone) {
+                let action = cell_action(zone, liquid.and_then(|l| l.get(cell)).copied());
+                if let Some(state) = cell_state(&mut fq, cell, a, walls, action.as_ref()) {
                     *slot = state.u;
                 }
             }
@@ -1851,7 +2007,10 @@ impl Flow {
         let magic = (1.0 / wp - 0.5) * (1.0 / wm - 0.5);
         let constant = self.acceleration;
         let cell_force = &self.cell_force;
-        let forced = constant != [0.0; 3] || !cell_force.is_empty() || !self.zone_of.is_empty();
+        // with a phase change, each cell's liquid fraction after the last step (field by field:
+        // the pass borrows other fields mutably)
+        let liquid = self.thermal.as_ref().and_then(|t| t.phase.as_ref()).map(|p| &p.liquid[..]);
+        let forced = constant != [0.0; 3] || !cell_force.is_empty() || !self.zone_of.is_empty() || liquid.is_some();
         // The boundary nodes of the on-node wall-function bounce run eq. 14 instead.
         let fluid = if self.bulk.is_empty() { &self.fluid } else { &self.bulk };
         let (zone_of, actions) = (&self.zone_of, &self.actions);
@@ -1906,7 +2065,8 @@ impl Flow {
                 }
                 let a = cell_force.get(b * block + i).copied().unwrap_or(constant);
                 let zone = zone_of.get(b * block + i).and_then(|z| actions.get(*z as usize));
-                let Some(CellState { rho, u, force, wall }) = cell_state(&mut fq, b * block + i, a, model_walls, zone) else {
+                let action = cell_action(zone, liquid.and_then(|l| l.get(b * block + i)).copied());
+                let Some(CellState { rho, u, force, wall }) = cell_state(&mut fq, b * block + i, a, model_walls, action.as_ref()) else {
                     **block_max = f64::NAN;
                     return;
                 };

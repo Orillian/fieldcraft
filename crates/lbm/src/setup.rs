@@ -145,6 +145,18 @@ pub struct ThermalSetup {
     pub solids: Vec<SolidSetup>,
     /// The thermal interface layers between them.
     pub contacts: Vec<ContactSetup>,
+    /// Melting and freezing of the fluid, when its material has a phase change.
+    pub phase: Option<PhaseSetup>,
+}
+
+/// The fluid's phase change in the lattice's temperatures (`flow::Phase`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhaseSetup {
+    /// The latent heat over the specific heat, `L / c` (a temperature difference).
+    pub latent: f64,
+    /// The solidus and the liquidus, in the lattice's temperatures.
+    pub solidus: f64,
+    pub liquidus: f64,
 }
 
 /// A thermal interface layer between two conducting solids, in the fluid's lattice heat units
@@ -352,6 +364,12 @@ fn solids(model: &Model, t: &fieldcraft_model::FluidThermal, obstacles: &[String
             .position(|o| *o == c.body)
             .ok_or_else(|| Error::NotFound(format!("conducting solid `{}` is not an obstacle of the domain", c.body)))?;
         let m = model.material(&c.material);
+        if m.is_some_and(|m| m.phase_change.is_some()) {
+            return Err(Error::Invalid(format!(
+                "conducting solid `{}`: a phase change in a conducting solid is not supported yet (only the fluid melts and freezes)",
+                c.body
+            )));
+        }
         let props = m.and_then(|m| m.thermal.as_ref());
         let (Some(k), Some(cp), Some(density)) = (props.and_then(|p| p.conductivity), props.and_then(|p| p.specific_heat), m.and_then(|m| m.density))
         else {
@@ -696,6 +714,15 @@ impl Setup {
         // Heat: the scalar lattice's relaxation time from the diffusivity, the conditions in
         // lattice units (a flux is a temperature per step through a cell face).
         let mut thermal = match &domain.thermal {
+            // Melting and freezing live on the temperature lattice: without heat nothing would
+            // ever freeze, so a phase change is refused rather than ignored.
+            None if material.is_some_and(|m| m.phase_change.is_some()) => {
+                return Err(Error::Invalid(format!(
+                    "material `{}` has a phase change (melting and freezing), which needs heat in the fluid: give fluid domain `{}` a `thermal` block, or remove the phase change",
+                    domain.material,
+                    s.procedure.fluid_domain().unwrap_or_default()
+                )));
+            }
             None => None,
             Some(t) => {
                 let props = material.and_then(|m| m.thermal.as_ref());
@@ -743,6 +770,16 @@ impl Setup {
                     }
                 }
                 let beta = t.expansion.unwrap_or(0.0);
+                let phase = match material.and_then(|m| m.phase_change) {
+                    None => None,
+                    Some(p) => {
+                        let latent = p.latent_heat / c;
+                        if !(latent > 0.0 && latent.is_finite()) {
+                            return Err(Error::Invalid(format!("the latent heat of material `{}` does not fit this lattice", domain.material)));
+                        }
+                        Some(PhaseSetup { latent, solidus: kelvin_above(p.solidus, zero), liquidus: kelvin_above(p.liquidus, zero) })
+                    }
+                };
                 Some(ThermalSetup {
                     tau,
                     magic: thermal_magic(tau),
@@ -755,6 +792,7 @@ impl Setup {
                     conductivity: alpha,
                     solids: solids(model, t, &domain.obstacles, rho_c, dt, h)?,
                     contacts: contacts(t, rho_c, dt, h)?,
+                    phase,
                 })
             }
         };

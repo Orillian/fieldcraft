@@ -80,7 +80,7 @@ pub mod wall;
 pub use backend::{Backend, Choice, Fields, device_available, register_backend};
 pub use flow::{Flow, Group, Link, OpenCell, Rule, Target, ThermalState, ZoneSample};
 pub use memory::{DeviceBuffer, Memory};
-pub use setup::{ContactSetup, SolidSetup, ThermalSetup};
+pub use setup::{ContactSetup, PhaseSetup, SolidSetup, ThermalSetup};
 pub use setup::{Obstacle, Setup, ZoneKind, ZoneSetup, fluid_step};
 pub use solve::{
     ComponentCheck, FluidResult, FluidStats, ForceHistory, Frame, HeatHistory, Peak, ShearDependentTau, SolidResult, ZoneHistory, run, solve_fluid,

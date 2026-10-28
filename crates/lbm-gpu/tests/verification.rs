@@ -884,6 +884,19 @@ fn a_cavity_held_by_the_closure_follows_the_cpu() {
     }
 }
 
+#[test]
+fn melting_and_freezing_are_refused_clearly() {
+    let mut d = domain([0.0; 3], [4.0, 2.0, 2.0], 1.0);
+    d.thermal = Some(FluidThermal::default());
+    let mut m = hot_model(1.0, 0.1, 0.05, d, step(10.0, 1.0, None));
+    let mut fluid = m.material("Fluid").cloned().unwrap();
+    fluid.phase_change = Some(fieldcraft_model::PhaseChange { latent_heat: 1.0, solidus: kelvin(0.0), liquidus: kelvin(0.0) });
+    m.replace_material("Fluid", fluid).unwrap();
+    let (_, flow) = prepare(&m, &[]);
+    let e = GpuFlow::with_options(&flow, Policy::from_env().expect("FIELDCRAFT_GPU names a policy"), Options::default()).err().map(|e| e.to_string());
+    assert!(e.as_deref().is_some_and(|e| e.contains("freezing") && e.contains("cpu")), "{e:?}");
+}
+
 /// A body force changed while the flow runs (`Backend::set_acceleration`, for a flow held at a
 /// constant flow rate): plane Poiseuille flow driven by a for half its steps and 2a for the rest
 /// on both backends, which agree, as do their mean velocities (`Backend::mean_velocity`).
