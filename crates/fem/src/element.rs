@@ -353,7 +353,7 @@ impl<'a> Solid<'a> {
     }
 
     /// The incompatible modes' gradients at a point: det J₀/det J · J₀⁻¹ ∂P/∂ξ.
-    fn incompatible_gradients(&self, xi: [f64; 3], det: f64, j0: &([[f64; 3]; 3], f64)) -> [[f64; 3]; 3] {
+    pub(crate) fn incompatible_gradients(&self, xi: [f64; 3], det: f64, j0: &([[f64; 3]; 3], f64)) -> [[f64; 3]; 3] {
         let (inv0, det0) = j0;
         let mut g = [[0.0; 3]; 3];
         for (k, gk) in g.iter_mut().enumerate() {
@@ -366,7 +366,7 @@ impl<'a> Solid<'a> {
         g
     }
 
-    fn centre_jacobian(&self) -> Result<([[f64; 3]; 3], f64)> {
+    pub(crate) fn centre_jacobian(&self) -> Result<([[f64; 3]; 3], f64)> {
         let s = (self.ty.shape)([0.0; 3]);
         positive_inverse(&self.jacobian(&s)).ok_or_else(|| self.degenerate())
     }

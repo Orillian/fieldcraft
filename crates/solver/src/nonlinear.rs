@@ -75,12 +75,13 @@
 //! result reports the skew part's size relative to the load stiffness when it is not small.
 //!
 //! **Elements.** Solids (tet4, tet10, wedge6, hex8, hex20 full and reduced, hybrid hex8, hex20
-//! and tet10) and 2D plane strain and axisymmetric elements, total Lagrangian
-//! ([`fieldcraft_fem::finite`]); without nonlinear geometry an element of a plastic material
-//! takes the same loops with small strain, and an elastic one its linear stiffness (K u).
-//! Springs act along their fixed directions. Trusses, shells and beams (large rotations), plane
-//! stress, incompatible modes (with nonlinear geometry, or with an inelastic material) and
-//! centrifugal loads are refused by name.
+//! and tet10, incompatible-mode hex8) and 2D plane strain and axisymmetric elements (quad4 with
+//! incompatible modes too), total Lagrangian ([`fieldcraft_fem::finite`]); without nonlinear
+//! geometry an element of a plastic material takes the same loops with small strain, and an
+//! elastic one its linear stiffness (K u). Incompatible-mode elements keep their enhanced modes
+//! after the material history and solve them element by element at every evaluation, so the
+//! solver's history contract is unchanged. Springs act along their fixed directions. Trusses,
+//! shells and beams (large rotations), plane stress and centrifugal loads are refused by name.
 //!
 //! **Thermal strain.** The step's temperatures are its temperature loads, or, when it has
 //! temperature boundary conditions or heat loads, their steady conduction solved first (one-way
@@ -1399,12 +1400,8 @@ fn solve_on(model: &Model, step: &str, limits: &Limits, notes: Vec<String>) -> R
         (std::array::from_fn(|k| lo[k].min(p[k])), std::array::from_fn(|k| hi[k].max(p[k])))
     });
     let length = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f64>().sqrt().max(f64::MIN_POSITIVE);
-    let committed = mesh
-        .elements
-        .iter()
-        .zip(&problem.materials)
-        .map(|(e, m)| Ok(vec![0.0; e.kernel()?.rule().points().len() * m.history_len()]))
-        .collect::<Result<Vec<_>>>()?;
+    let committed =
+        mesh.elements.iter().zip(&problem.materials).map(|(e, m)| Ok(vec![0.0; e.kernel()?.nonlinear_history_len(m)])).collect::<Result<Vec<_>>>()?;
     // The undeformed state first: an element that is bad before anything moves is an error in
     // the model, not a reason to cut increments back.
     let undeformed = problem.evaluate(&vec![0.0; mesh.dofs()], 0.0, false, &committed, &[], &[], 0.0)?;
@@ -1726,7 +1723,11 @@ fn stresses(
         }
         .map_err(at)?;
         let len = material.history_len();
-        let plastic: Vec<f64> = if len > 0 { history.chunks(len).filter_map(|h| material.plastic_strain(h)).collect() } else { Vec::new() };
+        let plastic: Vec<f64> = if len > 0 {
+            kernel.points_history(material, history).chunks(len).filter_map(|h| material.plastic_strain(h)).collect()
+        } else {
+            Vec::new()
+        };
         Ok((points, plastic, kernel.ty(), kernel.rule()))
     });
     let mut extrapolations: Vec<(&'static ElementType, Rule, Extrapolation)> = Vec::new();

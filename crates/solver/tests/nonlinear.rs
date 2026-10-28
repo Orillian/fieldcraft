@@ -63,7 +63,7 @@ fn neo_hookean_block_in_uniaxial_stretch() {
     let (e, nu, lam) = (10.0, 0.3, 2.0);
     let (mu, kappa) = (e / (2.0 * (1.0 + nu)), e / (3.0 * (1.0 - 2.0 * nu)));
     let (l, sigma) = neo_hookean_uniaxial(mu, kappa, lam);
-    for (kind, formulation, name) in variants().into_iter().filter(|v| v.1 != incompatible()) {
+    for (kind, formulation, name) in variants() {
         let mut g = grid([2, 2, 2], kind, |x| x);
         g.define(iso(e, nu), None, formulation, nonlinear());
         neo_hookean(&mut g, e, nu);
@@ -133,7 +133,7 @@ fn nonlinear_patch_test() {
     let tau = neo.response(&f, None, &[], &mut []).unwrap().stress;
     let j = fieldcraft_fem::dense::det3(&f);
     let hybrid = Formulation { hybrid: true, ..Formulation::default() };
-    let mut cases: Vec<(ElementKind, Formulation, &str)> = variants().into_iter().filter(|v| v.1 != incompatible()).collect();
+    let mut cases: Vec<(ElementKind, Formulation, &str)> = variants();
     cases.extend([
         (ElementKind::Hex8, hybrid, "hex8 hybrid"),
         (ElementKind::Hex20, hybrid, "hex20 hybrid"),
@@ -437,14 +437,7 @@ fn nonlinear_steps_fail_cleanly() {
         step.set_procedure(Procedure::NonlinearStatic(bad.clone()));
         assert!(capped.model.replace_step(step).is_err(), "{bad:?}");
     }
-    // Refused by name: incompatible modes, a hybrid St Venant–Kirchhoff element, centrifugal loads.
-    let mut im = grid([2, 1, 1], ElementKind::Hex8, |q| q);
-    im.define(iso(100.0, 0.3), None, incompatible(), nonlinear());
-    im.fixed("root", |q| near(q[0], 0.0));
-    im.face_set("end", |q| near(q[0], 1.0));
-    im.load("p", Load::Pressure { set: "end".into(), magnitude: 1.0 });
-    let err = solve_nonlinear(&im.model, None, &Limits::default()).unwrap_err().to_string();
-    assert!(err.contains("incompatible modes in nonlinear steps"), "{err}");
+    // Refused by name: a hybrid St Venant–Kirchhoff element, centrifugal loads.
     let mut hy = grid([2, 1, 1], ElementKind::Hex8, |q| q);
     hy.define(iso(100.0, 0.3), None, Formulation { hybrid: true, ..Formulation::default() }, nonlinear());
     hy.fixed("root", |q| near(q[0], 0.0));

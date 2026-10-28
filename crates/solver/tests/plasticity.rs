@@ -59,7 +59,7 @@ fn hybrid() -> Formulation {
 fn finite_strain_uniaxial_tension_follows_the_logarithmic_closed_form() {
     let strain: f64 = 0.2;
     let tau = uniaxial(strain);
-    let mut cases: Vec<(ElementKind, Formulation, &str)> = variants().into_iter().filter(|v| v.1 != incompatible()).collect();
+    let mut cases: Vec<(ElementKind, Formulation, &str)> = variants();
     cases.extend([
         (ElementKind::Hex8, hybrid(), "hex8 hybrid"),
         (ElementKind::Hex20, hybrid(), "hex20 hybrid"),
@@ -99,6 +99,7 @@ fn small_strain_uniaxial_tension_follows_the_closed_form() {
             (ElementKind::Tet10, full(), "tet10"),
             (ElementKind::Hex20, reduced(), "hex20 reduced"),
             (ElementKind::Hex20, hybrid(), "hex20 hybrid"),
+            (ElementKind::Hex8, incompatible(), "hex8 incompatible"),
         ] {
             let r = solve(&cube(kind, formulation, small.clone(), bilinear(hardening), strain));
             for e in &r.elements {
@@ -267,14 +268,6 @@ fn plastic_steps_refuse_and_fail_cleanly() {
     let r = solve(&cube(ElementKind::Hex8, full(), NonlinearStatic::default(), jc(0.0), 0.01));
     assert!(r.warnings.iter().any(|w| w.contains("isothermal")), "{:?}", r.warnings);
     let small = NonlinearStatic { nonlinear_geometry: false, ..NonlinearStatic::default() };
-    let err = solve_nonlinear(
-        &cube(ElementKind::Hex8, incompatible(), small.clone(), bilinear(Hardening::Isotropic), 0.01).model,
-        None,
-        &Limits::default(),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(err.contains("incompatible modes with an inelastic material"), "{err}");
     // Softening steeper than −3G past a small plastic strain: the point localises, the step cuts
     // back to its minimum increment and stops, naming the element.
     let g_mod = E / (2.0 * (1.0 + NU));

@@ -163,6 +163,20 @@ impl Kernel<'_> {
         }
     }
 
+    /// The length of the element's history in a nonlinear step: the material's per
+    /// integration point, then the incompatible modes.
+    pub fn nonlinear_history_len(&self, m: &MaterialModel) -> usize {
+        match self {
+            Kernel::Solid(s) => s.nonlinear_history_len(m),
+            Kernel::Plane(p) => p.nonlinear_history_len(m),
+        }
+    }
+
+    /// The integration points' part of a nonlinear history (the incompatible modes follow it).
+    pub fn points_history<'h>(&self, m: &MaterialModel, history: &'h [f64]) -> &'h [f64] {
+        history.get(..self.rule().points().len() * m.history_len()).unwrap_or_default()
+    }
+
     /// Cauchy stress and strain (logarithmic at finite strain) at the integration points, as
     /// [`Self::nonlinear`].
     pub fn nonlinear_stresses(

@@ -370,7 +370,7 @@ impl<'a> Plane<'a> {
 
     /// The incompatible modes' strain columns at every stiffness point: Taylor's mapped
     /// derivatives (and the hoop value P/r when axisymmetric), shifted by their volume mean.
-    fn incompatible_columns(&self, points: &[(Point, At)]) -> Result<Vec<[Column; 2]>> {
+    pub(crate) fn incompatible_columns(&self, points: &[(Point, At)]) -> Result<Vec<[Column; 2]>> {
         let s0 = (self.ty.shape)([0.0; 3]);
         let (j0, det0) = self.jacobian(&s0);
         if !(det0 > 0.0 && det0.is_finite()) {
@@ -411,7 +411,7 @@ impl<'a> Plane<'a> {
     }
 
     /// The integration points with their data.
-    fn points(&self) -> Result<Vec<(Point, At)>> {
+    pub(crate) fn points(&self) -> Result<Vec<(Point, At)>> {
         self.rule().points().into_iter().map(|p| self.at(&p).map(|a| (p, a))).collect()
     }
 
@@ -725,7 +725,7 @@ pub(crate) fn add_outer(k: &mut Matrix, g: &[f64], c: f64) {
 }
 
 /// The `size` × `size` block of `m` starting at (`row`, `col`).
-fn sub_block(m: &Matrix, row: usize, col: usize, size: usize) -> Matrix {
+pub(crate) fn sub_block(m: &Matrix, row: usize, col: usize, size: usize) -> Matrix {
     let mut out = Matrix::zeros(size);
     for i in 0..size {
         for j in 0..size {

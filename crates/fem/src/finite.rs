@@ -52,18 +52,47 @@
 //! radial motion; Bonet & Wood 2008, §9.5). Plane stress (whose thickness change needs a local
 //! iteration for σ_zz = 0) is refused.
 //!
-//! **Incompatible modes** (hex8, quad4) are refused in nonlinear steps: their finite-strain form
-//! (enhanced assumed strain, J. C. Simo, F. Armero, IJNME 33:1413–1449, 1992) needs the internal
-//! modes as element unknowns carried between iterations, and it develops spurious hourglass
-//! modes in large compression (P. Wriggers, S. Reese, CMAME 135:201–209, 1996), which want a
-//! stabilised variant of their own. With small strain they are refused for inelastic materials
-//! too: their internal modes would carry the plastic history between iterations.
+//! **Incompatible modes** (hex8, quad4): the enhanced assumed strain form of J. C. Simo,
+//! F. Armero, *Geometrically non-linear enhanced strain mixed methods and the method of
+//! incompatible modes*, IJNME 33(7):1413–1449, 1992, in which the incompatible-mode element is
+//! the case of an enhanced deformation gradient F = I + Σ u_a ⊗ ∇₀N_a + Σ α_k ⊗ G̃_k with the
+//! linear element's mapped mode gradients G̃_k = det J₀/det J · J₀⁻ᵀ ∂P_k/∂ξ (Taylor, Beresford
+//! & Wilson 1976; in 2D with the mean-shifted hoop column of the axisymmetric element). The
+//! modes join the loops above as extra "nodes": h = ∫ B̃ₓᵀ τ dV₀ are their forces and the
+//! tangent over (u, α) has the same material and geometric terms. The modes α are element
+//! unknowns, stored after the material history (the last converged α), and solved at every
+//! evaluation by a local Newton iteration from them, α ← α − K_αα⁻¹ h, at most
+//! `MAX_MODE_ITERATIONS` times to `MODE_TOLERANCE`; the material restarts from its
+//! committed history at every local iteration, so plasticity is consistent too. The element
+//! returns f* = f_u − K_uα K_αα⁻¹ h and K* = K_uu − K_uα K_αα⁻¹ K_αu, the consistent tangent at
+//! the solved α (implicit function theorem). At u = 0 K* is the linear element's stiffness. A
+//! K_αα that is not positive definite, or modes that do not converge, are an element error
+//! (the increment cuts back).
+//!
+//! In large compression enhanced strain elements develop spurious hourglass modes (P. Wriggers,
+//! S. Reese, *A note on enhanced strain methods for large deformations*, CMAME 135:201–209,
+//! 1996). No stabilisation is adopted here (Glaser & Armero 1997 and Reese, Wriggers & Reddy
+//! 2000 are the published remedies); instead, with nonlinear geometry and an elastic material
+//! every tangent evaluation checks that K* is positive definite on the element's hourglass
+//! modes (the patterns ξη, ηζ, ζξ, ξηζ of hex8 and ξη of quad4 along each axis, less their
+//! linear part in the current configuration, so no constant-strain stiffness enters) and
+//! refuses the state with an element error when it is not, so a step never converges to a
+//! state that has silently lost its hourglass stiffness. The error cuts the increment back
+//! like any element error; the loss belongs to the state, so smaller increments approach it
+//! again and the step stops at the minimum increment, naming the element. The check is an
+//! element-level criterion: it fires where the coarse element itself loses stiffness, not
+//! where the material does (a neo-Hookean material stays strongly elliptic in compression), and
+//! it would fire on displacement-based elements at large compression too (a fully integrated
+//! hex8 cube loses that stiffness at the same stretch). (With plasticity a fully plastic
+//! element may legitimately soften in such a mode, so the check is left to the global
+//! tangent's negative pivots.)
+//! Plane stress stays refused, with or without the modes.
 
 use crate::constitutive::{MaterialModel, Response, add_pressure, logarithmic_strain};
 use crate::dense::{Cholesky, Matrix, inverse3};
 use crate::element::{Formulation, PointStress, Solid, accumulate_symmetric, b_block};
 use crate::hybrid::pressure_basis;
-use crate::plane::{Plane, Theory};
+use crate::plane::{Column, Plane, Theory, sub_block};
 use crate::rotation::{IDENTITY, Mat3};
 use crate::{Error, Result};
 
@@ -229,27 +258,236 @@ fn check_displacements<const N: usize>(u: &[[f64; N]], nodes: usize) -> Result<(
     Ok(())
 }
 
-/// Check the element's history slices against the material and its points.
-fn check_history(m: &MaterialModel, points: usize, committed: &[f64], updated: &[f64]) -> Result<usize> {
+/// Check the element's history slices against the material, its points and its enhanced
+/// modes (stored after the points' blocks).
+fn check_history(m: &MaterialModel, points: usize, modes: usize, committed: &[f64], updated: &[f64]) -> Result<usize> {
     let len = m.history_len();
-    if committed.len() != points * len || updated.len() != points * len {
-        return Err(Error::Invalid(format!("{} history values for {points} points of {len}", committed.len())));
+    let expected = points * len + modes;
+    if committed.len() != expected || updated.len() != expected {
+        return Err(Error::Invalid(format!("{} history values for {points} points of {len} and {modes} enhanced modes", committed.len())));
     }
     Ok(len)
 }
 
+/// At most this many local Newton iterations solve an element's enhanced modes.
+const MAX_MODE_ITERATIONS: usize = 25;
+/// The enhanced modes are solved when their Newton correction is at most this fraction of the
+/// largest nodal displacement or mode amplitude, plus `MODE_ABSOLUTE`.
+const MODE_TOLERANCE: f64 = 1e-11;
+/// The absolute part of the modes' tolerance, as a fraction of the element's size: above the
+/// round-off of the Newton correction (about 1e-16 of the size, whatever the displacements), so
+/// an element that barely moves still converges.
+const MODE_ABSOLUTE: f64 = 1e-13;
+
+/// The enhanced modes α of an incompatible-mode element at nodal displacements u (J. C. Simo,
+/// F. Armero, IJNME 33:1413–1449, 1992, §4–5): starting from the last converged `alpha`, the
+/// local Newton iteration α ← α − K_αα⁻¹ h solves h(u, α) = 0, and the condensed forces and
+/// tangent are f* = f_u − K_uα K_αα⁻¹ h and K* = K_uu − K_uα K_αα⁻¹ K_αu, the consistent
+/// tangent at the solved α. `evaluate` returns the forces and the tangent over the `nodal`
+/// degrees of freedom and the modes after them; `scale` is the largest nodal displacement and
+/// `floor` the absolute tolerance.
+/// Returns the condensed forces and tangent (when `tangent`), what `evaluate` returned with
+/// them, and the solved α. With `hourglass` (the element's hourglass modes and its name)
+/// and `tangent`, the solved state is checked with [`check_hourglass`].
+fn enhanced<P>(
+    nodal: usize,
+    alpha: &[f64],
+    scale: f64,
+    floor: f64,
+    tangent: bool,
+    hourglass: Option<(&[Vec<f64>], &str)>,
+    mut evaluate: impl FnMut(&[f64]) -> Result<(Finite, P)>,
+) -> Result<(Finite, P, Vec<f64>)> {
+    let modes = alpha.len();
+    let mut alpha = alpha.to_vec();
+    for _ in 0..MAX_MODE_ITERATIONS {
+        let (finite, points) = evaluate(&alpha)?;
+        let k = finite.tangent.ok_or_else(|| Error::Invalid("the enhanced modes need the element tangent".into()))?;
+        let chol = Cholesky::new(&sub_block(&k, nodal, nodal, modes))
+            .map_err(|_| Error::Degenerate("the enhanced modes' stiffness K_αα of an incompatible-mode element is not positive definite".into()))?;
+        let mut d = finite.force.get(nodal..).unwrap_or_default().to_vec();
+        chol.solve(&mut d);
+        if d.len() != modes || d.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Degenerate("the enhanced modes of an incompatible-mode element are not finite".into()));
+        }
+        let size = alpha.iter().fold(scale, |a, v| a.max(v.abs()));
+        let step = d.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+        alpha.iter_mut().zip(&d).for_each(|(a, v)| *a -= v);
+        if step > MODE_TOLERANCE * size + floor {
+            continue;
+        }
+        // f* = f_u − K_uα d with d = K_αα⁻¹ h, what is left of h.
+        let force: Vec<f64> = (0..nodal)
+            .map(|i| finite.force.get(i).copied().unwrap_or(0.0) - d.iter().enumerate().map(|(a, v)| k.get(i, nodal + a) * v).sum::<f64>())
+            .collect();
+        let condensed = tangent.then(|| {
+            let mut out = sub_block(&k, 0, 0, nodal);
+            for j in 0..nodal {
+                let mut col: Vec<f64> = (0..modes).map(|a| k.get(nodal + a, j)).collect();
+                chol.solve(&mut col);
+                for i in 0..nodal {
+                    out.add(i, j, -col.iter().enumerate().map(|(a, v)| k.get(i, nodal + a) * v).sum::<f64>());
+                }
+            }
+            out
+        });
+        if let (Some((patterns, kind)), Some(condensed)) = (hourglass, condensed.as_ref()) {
+            check_hourglass(condensed, patterns, kind)?;
+        }
+        return Ok((Finite { force, tangent: condensed }, points, alpha));
+    }
+    Err(Error::Degenerate(format!("the enhanced modes of an incompatible-mode element did not converge in {MAX_MODE_ITERATIONS} local iterations")))
+}
+
+/// The nonlinear evaluation of an incompatible-mode element whose `modes` follow the material
+/// history in `committed` and `updated`: the modes solved and condensed by [`enhanced`] from
+/// the stored ones, `evaluate` giving the uncondensed forces and tangent over the nodes and
+/// the modes (as extra nodes after them in its `u`) with the material history only. The
+/// hourglass check runs on elastic materials at finite strain when the tangent is asked for;
+/// `hourglass` gives the element's hourglass modes at `u` and its name then.
+#[allow(clippy::too_many_arguments)]
+fn condensed<const N: usize, P>(
+    m: &MaterialModel,
+    u: &[[f64; N]],
+    xyz: &[[f64; 3]],
+    kin: Kinematics,
+    modes: usize,
+    committed: &[f64],
+    updated: &mut [f64],
+    tangent: bool,
+    hourglass: impl FnOnce() -> Result<(Vec<Vec<f64>>, String)>,
+    mut evaluate: impl FnMut(&[[f64; N]], &[f64], &mut [f64]) -> Result<(Finite, P)>,
+) -> Result<(Finite, P)> {
+    let split = committed.len().saturating_sub(modes);
+    let (material, stored) = committed.split_at(split);
+    let (updated, alpha_out) = updated.split_at_mut(split);
+    let check = (tangent && kin == Kinematics::Finite && !m.is_path_dependent()).then(hourglass).transpose()?;
+    let check = check.as_ref().map(|(patterns, kind)| (patterns.as_slice(), kind.as_str()));
+    let mut extended = u.to_vec();
+    let (scale, floor) = mode_scales(u, xyz);
+    let (finite, points, alpha) = enhanced(N * u.len(), stored, scale, floor, tangent, check, |alpha| {
+        extended.truncate(u.len());
+        extended.extend(alpha.as_chunks::<N>().0);
+        evaluate(&extended, material, updated)
+    })?;
+    if alpha_out.len() != alpha.len() {
+        return Err(Error::Invalid(format!("{} enhanced modes stored for {}", alpha_out.len(), alpha.len())));
+    }
+    alpha_out.copy_from_slice(&alpha);
+    Ok((finite, points))
+}
+
+/// The scales of the modes' tolerance: the largest nodal displacement, and `MODE_ABSOLUTE` of
+/// the element's size.
+fn mode_scales<const N: usize>(u: &[[f64; N]], xyz: &[[f64; 3]]) -> (f64, f64) {
+    let size = (0..3)
+        .map(|k| {
+            let (lo, hi) = xyz.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p[k]), hi.max(p[k])));
+            hi - lo
+        })
+        .fold(0.0f64, f64::max);
+    (u.iter().flatten().fold(0.0f64, |a, v| a.max(v.abs())), MODE_ABSOLUTE * size)
+}
+
+/// The hourglass modes of a linear element in its current configuration: for each parent
+/// pattern h (its values at the corners, which sum to zero) and each direction, the nodal
+/// displacement field h minus its linear part. With the corners' current positions x_I, the
+/// integrated gradients b_I = ∫ ∇N_I dv and the volume v, the mean gradient of a field u is
+/// (1/v) Σ_I u_I ⊗ b_I, exact for every linear field because Σ_I b_I = 0 and
+/// Σ_I x_I ⊗ b_I = v I (D. P. Flanagan, T. Belytschko, IJNME 17(5):679–706, 1981). The mode
+/// Γ_I = h_I − (x_I − x̄) · g with g = (1/v) Σ_J h_J b_J has zero mean gradient and zero mean:
+/// it is the part of h that no linear field reaches, so K restricted to the modes holds no
+/// constant-strain stiffness. (Flanagan and Belytschko's γ_α = h_α − (1/v) Σ_i (h_α · x_i) b_i
+/// is the same projection transposed: the covector that extracts these modes, orthogonal to
+/// every linear field.) On a parallelepiped Γ = h.
+fn hourglass_modes<const D: usize>(x: &[[f64; D]], b: &[[f64; D]], volume: f64, bases: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let n = x.len() as f64;
+    let centre: [f64; D] = std::array::from_fn(|i| x.iter().map(|p| p[i]).sum::<f64>() / n);
+    let mut out = Vec::with_capacity(bases.len() * D);
+    for h in bases {
+        let g: [f64; D] = std::array::from_fn(|i| h.iter().zip(b).map(|(hj, bj)| hj * bj[i]).sum::<f64>() / volume);
+        let mode: Vec<f64> = h.iter().zip(x).map(|(hj, p)| hj - (0..D).map(|i| (p[i] - centre[i]) * g[i]).sum::<f64>()).collect();
+        for dir in 0..D {
+            out.push(mode.iter().flat_map(|m| std::array::from_fn::<f64, D, _>(|k| if k == dir { *m } else { 0.0 })).collect());
+        }
+    }
+    out
+}
+
+/// The current positions of the first `N` corners `xyz` displaced by `u` (in `D` dimensions).
+fn current<const N: usize, const D: usize>(xyz: &[[f64; 3]], u: &[[f64; D]]) -> [[f64; D]; N] {
+    std::array::from_fn(|i| {
+        let (p, d) = (xyz.get(i).copied().unwrap_or_default(), u.get(i).copied().unwrap_or([0.0; D]));
+        std::array::from_fn(|k| p[k] + d[k])
+    })
+}
+
+/// The hourglass modes of hex8 with corners `xyz` displaced by `u` ([`hourglass_modes`] of the
+/// patterns ξη, ηζ, ζξ and ξηζ along X, Y and Z).
+fn hex8_hourglass(xyz: &[[f64; 3]], u: &[[f64; 3]]) -> Result<Vec<Vec<f64>>> {
+    let x: [[f64; 3]; 8] = current(xyz, u);
+    let uniform = crate::uniform::Hex8::hex8_deformed(&x)?;
+    let patterns: [fn(&[f64; 3]) -> f64; 4] = [|c| c[0] * c[1], |c| c[1] * c[2], |c| c[2] * c[0], |c| c[0] * c[1] * c[2]];
+    let bases: Vec<Vec<f64>> = patterns.iter().map(|p| crate::shape::HEX_CORNERS.iter().map(p).collect()).collect();
+    Ok(hourglass_modes(&x, &uniform.b, uniform.volume, &bases))
+}
+
+/// The hourglass modes of quad4 with corners `xyz` (in its plane) displaced by `u`
+/// ([`hourglass_modes`] of the pattern ξη along x and y). The bilinear quadrilateral's integrated
+/// gradients are exact in closed form, b_I = ½ (y_{I+1} − y_{I−1}, x_{I−1} − x_{I+1}), and its
+/// area is their sum Σ_I x_I b_Ix; the axisymmetric element uses the same (r, z) geometry.
+fn quad4_hourglass(xyz: &[[f64; 3]], u: &[[f64; 2]]) -> Result<Vec<Vec<f64>>> {
+    let x: [[f64; 2]; 4] = current(xyz, u);
+    let b: [[f64; 2]; 4] = std::array::from_fn(|i| {
+        let (next, prev) = (x[(i + 1) % 4], x[(i + 3) % 4]);
+        [0.5 * (next[1] - prev[1]), 0.5 * (prev[0] - next[0])]
+    });
+    let area: f64 = x.iter().zip(&b).map(|(p, q)| p[0] * q[0]).sum();
+    if !(area > 0.0 && area.is_finite()) {
+        return Err(Error::Degenerate(format!("a 2D quad4 element has a current area of {area:.3e}")));
+    }
+    Ok(hourglass_modes(&x, &b, area, &[vec![1.0, -1.0, 1.0, -1.0]]))
+}
+
+/// Whether `k` (its leading block over the patterns' degrees of freedom) is positive definite
+/// on the span of `patterns`, by the symmetric part of Pᵀ K P.
+fn positive_on(k: &Matrix, patterns: &[Vec<f64>]) -> bool {
+    let n = patterns.len();
+    let mut h = Matrix::zeros(n);
+    for (i, a) in patterns.iter().enumerate() {
+        for (j, b) in patterns.iter().enumerate() {
+            let mut v = 0.0;
+            for (r, x) in a.iter().enumerate().filter(|(_, x)| **x != 0.0) {
+                for (c, y) in b.iter().enumerate().filter(|(_, y)| **y != 0.0) {
+                    v += x * y * 0.5 * (k.get(r, c) + k.get(c, r));
+                }
+            }
+            h.add(i, j, v);
+        }
+    }
+    Cholesky::new(&h).is_ok()
+}
+
+/// Refuse a condensed tangent K* that is not positive definite on the element's hourglass
+/// modes ([`hourglass_modes`]): the spurious instability of enhanced strain elements in large
+/// compression (P. Wriggers, S. Reese, CMAME 135:201–209, 1996). It is an element-level
+/// criterion: a fully integrated hex8 loses the same stiffness at large compression too, and an
+/// incompatible-mode element stops there rather than risk a converged state that has
+/// hourglassed. The error is `Degenerate`, so the increment cuts back.
+fn check_hourglass(condensed: &Matrix, patterns: &[Vec<f64>], kind: &str) -> Result<()> {
+    if positive_on(condensed, patterns) {
+        return Ok(());
+    }
+    Err(Error::Degenerate(format!(
+        "the {kind} incompatible-mode element lost its stiffness against hourglassing (the instability of enhanced strain elements in large compression, Wriggers & Reese 1996); refine the mesh there or use full integration, hybrid or quadratic elements"
+    )))
+}
+
 impl Solid<'_> {
     /// Refuse what has no form here.
-    fn check_nonlinear(&self, m: &MaterialModel, u: &[[f64; 3]], kin: Kinematics) -> Result<()> {
+    fn check_nonlinear(&self, m: &MaterialModel, u: &[[f64; 3]]) -> Result<()> {
         check_displacements(u, self.ty.nodes)?;
         match self.formulation {
-            Formulation::IncompatibleModes => {
-                let why = match kin {
-                    Kinematics::Finite => "in nonlinear steps (their finite-strain form, enhanced assumed strain, is not implemented",
-                    Kinematics::Small => "with an inelastic material (their internal modes would carry the plastic history",
-                };
-                Err(Error::NotSupported(format!("{} incompatible modes {why}; use full integration, hybrid or hex20)", self.ty.kind.name())))
-            }
             Formulation::Hybrid { .. } if !m.is_decoupled() => Err(Error::NotSupported(format!(
                 "hybrid elements of a {} material in nonlinear steps (the mixed formulation needs a volumetric–isochoric split of the strain energy; give the material the neo-Hookean option)",
                 m.name()
@@ -258,17 +496,31 @@ impl Solid<'_> {
         }
     }
 
+    /// The length of the element's history in a nonlinear step: the material's per integration
+    /// point, then the enhanced modes α of incompatible-mode elements.
+    pub fn nonlinear_history_len(&self, m: &MaterialModel) -> usize {
+        self.rule().points().len() * m.history_len() + self.dofs().internal.incompatible_modes
+    }
+
     /// F, J and the gradients at every stiffness point: the current ones at finite strain, the
-    /// reference ones at small strain.
+    /// reference ones at small strain. With incompatible modes `u` carries the modes α after
+    /// the nodes, and their mapped gradients follow the nodes' (the enhanced F).
     fn kinematics(&self, u: &[[f64; 3]], kin: Kinematics, thermal: Option<&Temperature>) -> Result<Vec<PointKinematics>> {
         let n = self.ty.nodes;
         if let Some(t) = thermal {
             t.check(n)?;
         }
+        let j0 = if self.formulation == Formulation::IncompatibleModes { Some(self.centre_jacobian()?) } else { None };
         let mut out = Vec::new();
+        let mut reference: Vec<[f64; 3]> = Vec::with_capacity(n + 3);
         for p in self.rule().points() {
             let g = self.gradients(p.xi)?;
-            let reference = g.dx.get(..n).unwrap_or_default();
+            reference.clear();
+            reference.extend_from_slice(g.dx.get(..n).unwrap_or_default());
+            if let Some(j0) = &j0 {
+                reference.extend_from_slice(&self.incompatible_gradients(p.xi, g.det, j0));
+            }
+            let reference = reference.as_slice();
             let total = crate::constitutive::deformation_gradient(u, reference);
             let (weight, x0) = (g.det * p.weight, self.position_of(g.shape.values()));
             let heat = Heat::at(thermal, g.shape.values())?;
@@ -304,10 +556,35 @@ impl Solid<'_> {
         updated: &mut [f64],
         tangent: bool,
     ) -> Result<(Finite, Vec<(PointKinematics, Response)>)> {
-        self.check_nonlinear(m, u, kin)?;
+        self.check_nonlinear(m, u)?;
+        let modes = self.dofs().internal.incompatible_modes;
+        check_history(m, self.rule().points().len(), modes, committed, updated)?;
+        if modes == 0 {
+            return self.evaluate_points(m, u, kin, thermal, committed, updated, tangent);
+        }
+        let hourglass = || Ok((hex8_hourglass(self.xyz, u)?, self.ty.kind.name().to_string()));
+        condensed(m, u, self.xyz, kin, modes, committed, updated, tangent, hourglass, |u, material, updated| {
+            self.evaluate_points(m, u, kin, thermal, material, updated, true)
+        })
+    }
+
+    /// [`Self::nonlinear_points`] over the nodes and, with incompatible modes, the modes α
+    /// after them in `u` (the forces and the tangent over both, uncondensed), with the material
+    /// history only.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_points(
+        &self,
+        m: &MaterialModel,
+        u: &[[f64; 3]],
+        kin: Kinematics,
+        thermal: Option<&Temperature>,
+        committed: &[f64],
+        updated: &mut [f64],
+        tangent: bool,
+    ) -> Result<(Finite, Vec<(PointKinematics, Response)>)> {
         let points = self.kinematics(u, kin, thermal)?;
-        let len = check_history(m, points.len(), committed, updated)?;
-        let ndof = 3 * self.ty.nodes;
+        let len = m.history_len();
+        let ndof = 3 * u.len();
         let mut force = vec![0.0; ndof];
         let mut k = tangent.then(|| Matrix::zeros(ndof));
         let responses: Vec<Response> = if let Formulation::Hybrid { .. } = self.formulation {
@@ -415,8 +692,9 @@ impl Solid<'_> {
     }
 
     /// Internal forces and (with `tangent`) the tangent stiffness at nodal displacements `u`,
-    /// with the material history `committed` at the start of the increment (points × the
-    /// material's history length) written, updated, to `updated`.
+    /// with the element's history `committed` at the start of the increment written, updated,
+    /// to `updated`: points × the material's history length, then the enhanced modes α of an
+    /// incompatible-mode element ([`Self::nonlinear_history_len`] values in all).
     pub fn finite_strain(&self, m: &MaterialModel, u: &[[f64; 3]], committed: &[f64], updated: &mut [f64], tangent: bool) -> Result<Finite> {
         Ok(self.nonlinear_points(m, u, Kinematics::Finite, None, committed, updated, tangent)?.0)
     }
@@ -557,13 +835,12 @@ impl Plane<'_> {
                 "plane stress elements in nonlinear steps ({why}; use plane strain, axisymmetric or solid elements)"
             )));
         }
-        if self.formulation == Formulation::IncompatibleModes {
-            return Err(Error::NotSupported(format!(
-                "2D {} incompatible modes in nonlinear steps (their finite-strain form, enhanced assumed strain, is not implemented; use full integration or quad8)",
-                self.ty.kind.name()
-            )));
-        }
         Ok(())
+    }
+
+    /// The length of the element's history in a nonlinear step, as [`Solid::nonlinear_history_len`].
+    pub fn nonlinear_history_len(&self, m: &MaterialModel) -> usize {
+        self.rule().points().len() * m.history_len() + self.dofs().internal.incompatible_modes
     }
 
     /// Per point: F, J, the reference position, the small strain and the response; the forces
@@ -580,22 +857,55 @@ impl Plane<'_> {
         tangent: bool,
     ) -> Result<(Finite, Vec<PlanePoint>)> {
         self.check_nonlinear(m, u, kin)?;
-        let n = self.ty.nodes;
         if let Some(t) = thermal {
-            t.check(n)?;
+            t.check(self.ty.nodes)?;
         }
+        let modes = self.dofs().internal.incompatible_modes;
+        check_history(m, self.rule().points().len(), modes, committed, updated)?;
+        if modes == 0 {
+            return self.evaluate_points(m, u, None, kin, thermal, committed, updated, tangent);
+        }
+        let columns = self.incompatible_columns(&self.points()?)?;
+        let hourglass = || Ok((quad4_hourglass(self.xyz, u)?, format!("2D {}", self.ty.kind.name())));
+        condensed(m, u, self.xyz, kin, modes, committed, updated, tangent, hourglass, |u, material, updated| {
+            self.evaluate_points(m, u, Some(&columns), kin, thermal, material, updated, true)
+        })
+    }
+
+    /// [`Self::nonlinear_points`] over the nodes and, with the incompatible modes' strain
+    /// `columns` at the points, the modes α after them in `u` (uncondensed), with the
+    /// material history only.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_points(
+        &self,
+        m: &MaterialModel,
+        u: &[[f64; 2]],
+        columns: Option<&[[Column; 2]]>,
+        kin: Kinematics,
+        thermal: Option<&Temperature>,
+        committed: &[f64],
+        updated: &mut [f64],
+        tangent: bool,
+    ) -> Result<(Finite, Vec<PlanePoint>)> {
+        let n = self.ty.nodes;
         let rule = self.rule().points();
-        let len = check_history(m, rule.len(), committed, updated)?;
-        let ndof = 2 * n;
+        let len = m.history_len();
+        let ndof = 2 * u.len();
         let mut force = vec![0.0; ndof];
         let mut k = tangent.then(|| Matrix::zeros(ndof));
         let axisymmetric = self.theory == Theory::Axisymmetric;
         let small = kin == Kinematics::Small;
         // The kinematics of every point first: the mixed element's pressure needs them all.
         let mut kinematics = Vec::with_capacity(rule.len());
-        for p in &rule {
+        let mut cols: Vec<Column> = Vec::with_capacity(n + 2);
+        for (i, p) in rule.iter().enumerate() {
             let at = self.at(p)?;
-            let cols = at.g.get(..n).unwrap_or_default();
+            cols.clear();
+            cols.extend_from_slice(at.g.get(..n).unwrap_or_default());
+            if let Some(m) = columns.and_then(|c| c.get(i)) {
+                cols.extend_from_slice(m);
+            }
+            let cols = cols.as_slice();
             let mut f = IDENTITY;
             for (ua, g) in u.iter().zip(cols) {
                 for r in 0..2 {
@@ -793,6 +1103,11 @@ mod tests {
         (0..n).map(|i| [scale * (i as f64 * 1.3).sin(), scale * (i as f64 * 0.7).cos(), scale * (i as f64 * 2.1).sin()]).collect()
     }
 
+    /// The hex8 of corners [0, 1]³.
+    fn unit_cube() -> Vec<[f64; 3]> {
+        crate::shape::HEX_CORNERS.iter().map(|c| c.map(|v| 0.5 * (v + 1.0))).collect()
+    }
+
     /// Central differences of the internal forces against the tangent.
     fn check_tangent(solid: &Solid, m: &MaterialModel, u: &[[f64; 3]]) {
         check_tangent_from(solid, m, u, Kinematics::Finite, &[], 1e-6);
@@ -858,8 +1173,45 @@ mod tests {
             check_tangent(&hybrid, &yeoh, &displacement(x.len(), 0.08));
             assert!(hybrid.finite_strain(&svk, &displacement(x.len(), 0.0), &[], &mut [], false).is_err(), "SVK has no split");
         }
+        // Incompatible modes: the condensed tangent, the modes re-solved at every evaluation,
+        // from rest and from stored modes.
         let im = Solid::new(ElementKind::Hex8, &x8, Formulation::IncompatibleModes).unwrap();
-        assert!(matches!(im.finite_strain(&svk, &displacement(8, 0.0), &[], &mut [], true), Err(Error::NotSupported(_))));
+        for m in [&svk, &neo] {
+            check_tangent_from(&im, m, &displacement(8, 0.08), Kinematics::Finite, &[0.0; 9], 1e-6);
+            let mut stored = [0.0; 9];
+            im.finite_strain(m, &displacement(8, 0.05), &[0.0; 9], &mut stored, false).unwrap();
+            assert!(stored.iter().any(|a| *a != 0.0), "the modes are stored");
+            check_tangent_from(&im, m, &displacement(8, 0.08), Kinematics::Finite, &stored, 1e-6);
+        }
+    }
+
+    /// The incompatible-mode elements' local iteration: the modes solve h = 0 whatever they start
+    /// from, hostile input is an error, and the history must hold the modes.
+    #[test]
+    fn incompatible_modes_solve_their_equations_and_refuse_hostile_input() {
+        let neo = MaterialModel::NeoHookean { shear: 300.0, bulk: 3000.0 };
+        let x8: Vec<[f64; 3]> = hex20()[..8].to_vec();
+        let im = Solid::new(ElementKind::Hex8, &x8, Formulation::IncompatibleModes).unwrap();
+        let u = displacement(8, 0.08);
+        let (mut a, mut b) = ([0.0; 9], [0.0; 9]);
+        let fa = im.finite_strain(&neo, &u, &[0.0; 9], &mut a, false).unwrap().force;
+        let fb = im.finite_strain(&neo, &u, &[0.01; 9], &mut b, false).unwrap().force;
+        for (x, y) in fa.iter().zip(&fb).chain(a.iter().zip(&b)) {
+            assert!((x - y).abs() < 1e-9 * (1.0 + x.abs()), "the same state from another start: {x} vs {y}");
+        }
+        // The modes' own equations h = 0 at the stored modes.
+        let mut extended = u.clone();
+        extended.extend(a.as_chunks::<3>().0);
+        let full = im.evaluate_points(&neo, &extended, Kinematics::Finite, None, &[], &mut [], false).unwrap().0;
+        assert!(full.force[24..].iter().all(|h| h.abs() < 1e-9), "{:?}", &full.force[24..]);
+        let mut bad = u.clone();
+        bad[3][1] = f64::NAN;
+        assert!(im.finite_strain(&neo, &bad, &[0.0; 9], &mut [0.0; 9], true).is_err());
+        assert!(im.finite_strain(&neo, &u, &[f64::INFINITY; 9], &mut [0.0; 9], true).is_err());
+        assert!(matches!(im.finite_strain(&neo, &u, &[], &mut [], true), Err(Error::Invalid(_))), "no room for the modes");
+        let flip: Vec<[f64; 3]> = x8.iter().map(|p| [-2.0 * p[0], 0.0, 0.0]).collect();
+        assert!(matches!(im.finite_strain(&neo, &flip, &[0.0; 9], &mut [0.0; 9], true), Err(Error::Degenerate(_))));
+        assert_eq!(im.nonlinear_history_len(&neo), 9);
     }
 
     #[test]
@@ -868,6 +1220,13 @@ mod tests {
         let d = isotropic(e, nu).unwrap();
         let neo = MaterialModel::NeoHookean { shear: e / (2.0 * (1.0 + nu)), bulk: e / (3.0 * (1.0 - 2.0 * nu)) };
         let x20 = hex20();
+        // Incompatible modes: the linear element's condensed stiffness.
+        let x8: Vec<[f64; 3]> = x20[..8].to_vec();
+        let im = Solid::new(ElementKind::Hex8, &x8, Formulation::IncompatibleModes).unwrap();
+        let k = im.finite_strain(&neo, &[[0.0; 3]; 8], &[0.0; 9], &mut [0.0; 9], true).unwrap().tangent.unwrap();
+        for (a, b) in k.data.iter().zip(&im.stiffness(&d).unwrap().data) {
+            assert!((a - b).abs() < 1e-9 * e, "incompatible modes: {a} vs {b}");
+        }
         for (f, m) in [
             (Formulation::Full, MaterialModel::StVenantKirchhoff(Box::new(d))),
             (Formulation::Full, neo.clone()),
@@ -930,12 +1289,16 @@ mod tests {
                 check_tangent_from(&solid, &m, &displacement(x.len(), scale), kin, &committed, 1e-6);
             }
         }
-        // Incompatible modes have no inelastic form.
+        // Incompatible modes: the modes are re-solved from the committed ones, the material from
+        // its committed history at every local iteration.
         let im = Solid::new(ElementKind::Hex8, &x8, Formulation::IncompatibleModes).unwrap();
-        assert!(matches!(
-            im.nonlinear(&m, &displacement(8, 0.0), Kinematics::Small, None, &[0.0; 8 * HISTORY], &mut [0.0; 8 * HISTORY], true),
-            Err(Error::NotSupported(_))
-        ));
+        let len = 8 * HISTORY + 9;
+        for kin in [Kinematics::Finite, Kinematics::Small] {
+            let mut committed = vec![0.0; len];
+            im.nonlinear_points(&m, &displacement(8, 0.025), kin, None, &vec![0.0; len], &mut committed, false).unwrap();
+            assert!((0..8).all(|p| committed[p * HISTORY + PLASTIC_STRAIN] > 0.0), "incompatible modes {kin:?} yield everywhere");
+            check_tangent_from(&im, &m, &displacement(8, 0.05), kin, &committed, 1e-6);
+        }
     }
 
     #[test]
@@ -1173,6 +1536,64 @@ mod tests {
         }
         let stress = Plane::new(ElementKind::Quad4, &quad8[..4], Formulation::Full, Theory::PlaneStress { thickness: 1.0 }).unwrap();
         assert!(matches!(stress.finite_strain(&svk, &[[0.0; 2]; 4], &[], &mut [], true), Err(Error::NotSupported(_))));
+        let stress = Plane::new(ElementKind::Quad4, &quad8[..4], Formulation::IncompatibleModes, Theory::PlaneStress { thickness: 1.0 }).unwrap();
+        assert!(matches!(stress.finite_strain(&svk, &[[0.0; 2]; 4], &[0.0; 4], &mut [0.0; 4], true), Err(Error::NotSupported(_))));
+    }
+
+    /// Incompatible-mode quad4, plane strain and axisymmetric: the condensed tangent is the
+    /// derivative of the forces (the modes re-solved, from rest and from stored modes), elastic
+    /// and plastic, and at rest it is the linear element's stiffness.
+    #[test]
+    fn incompatible_quad4_tangents_are_the_derivative_of_the_forces() {
+        use crate::elastoplastic::HISTORY;
+        use fieldcraft_model::{Elastic, Hardening, Plastic};
+        let quad4 = [[1.0, 0.0, 0.0], [2.0, 0.1, 0.0], [2.2, 1.0, 0.0], [0.9, 1.1, 0.0]];
+        let j2 = crate::plasticity::J2::from_model(
+            &Elastic::Isotropic { young: 1000.0, poisson: 0.3 },
+            Some(&Plastic::Bilinear { yield_stress: 5.0, hardening_modulus: 50.0, hardening: Hardening::Isotropic }),
+            None,
+        )
+        .unwrap();
+        let plastic = MaterialModel::Plastic(std::sync::Arc::new(j2));
+        let neo = MaterialModel::NeoHookean { shear: 300.0, bulk: 3000.0 };
+        let svk = MaterialModel::StVenantKirchhoff(Box::new(isotropic(1000.0, 0.3).unwrap()));
+        let u = |scale: f64| -> Vec<[f64; 2]> { displacement(4, scale).iter().map(|v| [v[0], v[1]]).collect() };
+        for theory in [Theory::PlaneStrain { thickness: 2.0 }, Theory::Axisymmetric] {
+            let plane = Plane::new(ElementKind::Quad4, &quad4, Formulation::IncompatibleModes, theory).unwrap();
+            for (m, kin) in [(&neo, Kinematics::Finite), (&svk, Kinematics::Finite), (&plastic, Kinematics::Finite), (&plastic, Kinematics::Small)] {
+                let len = plane.nonlinear_history_len(m);
+                let mut committed = vec![0.0; len];
+                plane.nonlinear_points(m, &u(0.03), kin, None, &vec![0.0; len], &mut committed, false).unwrap();
+                assert!(committed[len - 4..].iter().any(|a| *a != 0.0), "the modes are stored");
+                let at = u(0.06);
+                let k = plane.nonlinear_points(m, &at, kin, None, &committed, &mut committed.clone(), true).unwrap().0.tangent.unwrap();
+                let scale = k.data.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+                let h = if kin == Kinematics::Small { 1e-8 } else { 1e-6 };
+                for j in 0..8 {
+                    let shifted = |s: f64| {
+                        let mut v = at.clone();
+                        v[j / 2][j % 2] += s;
+                        plane.nonlinear_points(m, &v, kin, None, &committed, &mut committed.clone(), false).unwrap().0.force
+                    };
+                    let (p, q) = (shifted(h), shifted(-h));
+                    for i in 0..8 {
+                        let numeric = (p[i] - q[i]) / (2.0 * h);
+                        assert!(
+                            (numeric - k.get(i, j)).abs() < 1e-6 * scale,
+                            "{theory:?} {} {kin:?} {i} {j}: {numeric} vs {}",
+                            m.name(),
+                            k.get(i, j)
+                        );
+                    }
+                }
+                assert_eq!(len, if m.history_len() > 0 { 4 * HISTORY + 4 } else { 4 });
+            }
+            let d = isotropic(1000.0, 0.3).unwrap();
+            let k = plane.finite_strain(&svk, &[[0.0; 2]; 4], &[0.0; 4], &mut [0.0; 4], true).unwrap().tangent.unwrap();
+            for (a, b) in k.data.iter().zip(&plane.stiffness(&d).unwrap().data) {
+                assert!((a - b).abs() < 1e-9 * 1000.0, "{theory:?}: {a} vs {b}");
+            }
+        }
     }
 
     #[test]
@@ -1230,6 +1651,128 @@ mod tests {
         let svk = MaterialModel::StVenantKirchhoff(Box::new(isotropic(1000.0, 0.3).unwrap()));
         let plane = Plane::new(ElementKind::Quad4, &quad8[..4], hybrid, Theory::Axisymmetric).unwrap();
         assert!(matches!(plane.finite_strain(&svk, &[[0.0; 2]; 4], &[], &mut [], true), Err(Error::NotSupported(_))));
+    }
+
+    /// A nearly incompressible neo-Hookean cube in homogeneous compression, free laterally: the
+    /// incompatible-mode element keeps its hourglass stiffness to a stretch of 0.6 and stops with
+    /// an error below 0.58, where the full-integration element at the same state has lost it
+    /// too.
+    #[test]
+    fn hourglass_instability_in_compression_is_an_error() {
+        let x = unit_cube();
+        let im = Solid::new(ElementKind::Hex8, &x, Formulation::IncompatibleModes).unwrap();
+        let full = Solid::new(ElementKind::Hex8, &x, Formulation::Full).unwrap();
+        for bulk in [10.0, 1000.0] {
+            let m = MaterialModel::NeoHookean { shear: 1.0, bulk };
+            let at = |stretch: f64| -> Vec<[f64; 3]> {
+                let lateral = 1.0 / stretch.sqrt();
+                x.iter().map(|p| [(lateral - 1.0) * p[0], (lateral - 1.0) * p[1], (stretch - 1.0) * p[2]]).collect()
+            };
+            im.finite_strain(&m, &at(0.6), &[0.0; 9], &mut [0.0; 9], true).unwrap();
+            let err = im.finite_strain(&m, &at(0.57), &[0.0; 9], &mut [0.0; 9], true).unwrap_err();
+            assert!(matches!(&err, Error::Degenerate(s) if s.contains("hourglass")), "{err}");
+            // The forces alone (no tangent) are not checked: stresses at a converged state.
+            im.finite_strain(&m, &at(0.57), &[0.0; 9], &mut [0.0; 9], false).unwrap();
+            let k = full.finite_strain(&m, &at(0.57), &[], &mut [], true).unwrap().tangent.unwrap();
+            assert!(!positive_on(&k, &hex8_hourglass(&x, &at(0.57)).unwrap()), "full integration has lost it too");
+        }
+    }
+
+    /// On a distorted hex8 the parent patterns carry a linear part (a mean gradient), the
+    /// hourglass modes do not; in homogeneous compression the condensed tangent loses its
+    /// stiffness on the modes at a stretch of 0.616, while on the parent patterns it stays
+    /// positive to 0.612. Between the two, the check on the modes stops the element and one on
+    /// the parent patterns would have let it through.
+    #[test]
+    fn hourglass_check_on_a_distorted_element_uses_the_true_modes() {
+        let cube = unit_cube();
+        // On the cube the modes are the parent patterns.
+        let parents = hex8_hourglass(&cube, &[[0.0; 3]; 8]).unwrap();
+        let mut x = cube.clone();
+        x[1] = [1.2, -0.1, 0.1];
+        x[6] = [1.4, 1.3, 1.2];
+        let uniform = crate::uniform::Hex8::hex8_deformed(&std::array::from_fn(|i| x[i])).unwrap();
+        let mean_gradient = |u: &[f64]| {
+            uniform
+                .gradient(&std::array::from_fn(|n| [u[3 * n], u[3 * n + 1], u[3 * n + 2]]))
+                .as_flattened()
+                .iter()
+                .fold(0.0f64, |a, v| a.max(v.abs()))
+        };
+        let modes = hex8_hourglass(&x, &[[0.0; 3]; 8]).unwrap();
+        assert!(modes.iter().all(|v| mean_gradient(v) < 1e-12), "no mean gradient");
+        assert!(modes.iter().all(|v| v.iter().sum::<f64>().abs() < 1e-12), "no mean displacement");
+        assert!(parents.iter().any(|v| mean_gradient(v) > 0.05), "the parent patterns have a linear part");
+
+        let im = Solid::new(ElementKind::Hex8, &x, Formulation::IncompatibleModes).unwrap();
+        let m = MaterialModel::NeoHookean { shear: 1.0, bulk: 10.0 };
+        let at = |stretch: f64| -> Vec<[f64; 3]> {
+            let lateral = 1.0 / stretch.sqrt();
+            x.iter().map(|p| [(lateral - 1.0) * p[0], (lateral - 1.0) * p[1], (stretch - 1.0) * p[2]]).collect()
+        };
+        // K* without the check.
+        let tangent = |u: &[[f64; 3]]| -> Matrix {
+            let none = || Ok((Vec::new(), String::new()));
+            let (finite, _) = condensed(&m, u, &x, Kinematics::Finite, 9, &[0.0; 9], &mut [0.0; 9], true, none, |u, material, updated| {
+                im.evaluate_points(&m, u, Kinematics::Finite, None, material, updated, true)
+            })
+            .unwrap();
+            finite.tangent.unwrap()
+        };
+        im.finite_strain(&m, &at(0.62), &[0.0; 9], &mut [0.0; 9], true).unwrap();
+        let u = at(0.614);
+        let k = tangent(&u);
+        assert!(positive_on(&k, &parents), "the parent patterns still see stiffness");
+        assert!(!positive_on(&k, &hex8_hourglass(&x, &u).unwrap()), "the hourglass modes do not");
+        let err = im.finite_strain(&m, &u, &[0.0; 9], &mut [0.0; 9], true).unwrap_err();
+        assert!(matches!(&err, Error::Degenerate(s) if s.contains("hourglass")), "{err}");
+    }
+
+    /// Incompatible-mode quad4, plane strain and axisymmetric, of a neo-Hookean material (bulk
+    /// modulus ten times the shear modulus) in homogeneous compression, free laterally: it keeps its hourglass
+    /// stiffness at a stretch of 0.6 and stops with an error at 0.5, a distorted element as well
+    /// as a square one. The fully integrated quad4 keeps its stiffness on the same modes there:
+    /// in 2D the check catches the enhanced element's own instability.
+    #[test]
+    fn hourglass_instability_of_quad4_in_compression_is_an_error() {
+        let square = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 1.0, 0.0]];
+        let distorted = [[1.0, 0.0, 0.0], [2.0, 0.1, 0.0], [2.2, 1.0, 0.0], [0.9, 1.1, 0.0]];
+        let m = MaterialModel::NeoHookean { shear: 1.0, bulk: 10.0 };
+        for theory in [Theory::PlaneStrain { thickness: 1.0 }, Theory::Axisymmetric] {
+            for x in [&square, &distorted] {
+                let im = Plane::new(ElementKind::Quad4, x, Formulation::IncompatibleModes, theory).unwrap();
+                let full = Plane::new(ElementKind::Quad4, x, Formulation::Full, theory).unwrap();
+                let at = |stretch: f64| -> Vec<[f64; 2]> {
+                    let lateral = if theory == Theory::Axisymmetric { 1.0 / stretch.sqrt() } else { 1.0 / stretch };
+                    x.iter().map(|p| [(lateral - 1.0) * p[0], (stretch - 1.0) * p[1]]).collect()
+                };
+                im.finite_strain(&m, &at(0.6), &[0.0; 4], &mut [0.0; 4], true).unwrap();
+                let err = im.finite_strain(&m, &at(0.5), &[0.0; 4], &mut [0.0; 4], true).unwrap_err();
+                assert!(matches!(&err, Error::Degenerate(s) if s.contains("hourglass")), "{theory:?} {x:?}: {err}");
+                im.finite_strain(&m, &at(0.5), &[0.0; 4], &mut [0.0; 4], false).unwrap();
+                let k = full.finite_strain(&m, &at(0.5), &[], &mut [], true).unwrap().tangent.unwrap();
+                assert!(positive_on(&k, &quad4_hourglass(x, &at(0.5)).unwrap()), "{theory:?} {x:?}: full integration keeps it");
+            }
+        }
+    }
+
+    /// An element that barely moves still solves its modes: the tolerance stays above the
+    /// round-off of the Newton correction (it used to fail below 1e-6 of the element's size).
+    #[test]
+    fn incompatible_modes_converge_at_tiny_displacements() {
+        let x = unit_cube();
+        let im = Solid::new(ElementKind::Hex8, &x, Formulation::IncompatibleModes).unwrap();
+        for bulk in [10.0, 1000.0, 1e6] {
+            let m = MaterialModel::NeoHookean { shear: 1.0, bulk };
+            for e in [6, 9, 12] {
+                let scale = 10f64.powi(-e);
+                let mut one = vec![[0.0; 3]; 8];
+                one[3][1] = scale;
+                for u in [displacement(8, scale), one] {
+                    im.finite_strain(&m, &u, &[0.0; 9], &mut [0.0; 9], true).unwrap();
+                }
+            }
+        }
     }
 
     /// uᵀ K_σ u = ∫ σ_xx (∂u_y/∂x)² dV = σ_xx V for u_y = x under a uniform σ_xx, in a distorted
