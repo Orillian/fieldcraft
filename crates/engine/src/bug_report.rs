@@ -183,7 +183,8 @@ pub fn draft(input: &Input, version: &str) -> Draft {
     let mut attachments = Vec::new();
     let mut clipboard = None;
     let mut reproduction = String::new();
-    // The session: the replayable script, from the attached model when there is one.
+    // The session: the replayable script, from the attached model when there is one, as pretty
+    // JSON with the home folder shown as `~` (its count of commands beside it).
     let model = input.model.as_ref().filter(|_| share && input.include_model);
     let script = share.then(|| {
         let mut steps = Vec::new();
@@ -191,13 +192,12 @@ pub fn draft(input: &Input, version: &str) -> Draft {
             steps.push(json!({"command": "file.open", "params": {"path": MODEL_FILE}}));
         }
         steps.extend(input.commands.iter().cloned());
-        Value::Array(steps)
+        (steps.len(), without_home(&serde_json::to_string_pretty(&steps).unwrap_or_default()))
     });
     if let Some(m) = model {
         attachments.push(Attachment { name: MODEL_FILE.into(), bytes: m.clone(), what: format!("the model ({} KB)", m.len().div_ceil(1024)) });
     }
-    if let Some(script) = &script {
-        let n = script.as_array().map_or(0, Vec::len);
+    if let Some((n, _)) = &script {
         reproduction = format!("Replay the attached session ({n} command(s)): `fieldcraft-cli run {SESSION_FILE}`");
         if model.is_some() {
             reproduction.push_str(&format!(" in a folder holding `{MODEL_FILE}` too"));
@@ -206,23 +206,19 @@ pub fn draft(input: &Input, version: &str) -> Draft {
         }
         reproduction.push('.');
     }
-    let inline = |evidence: &str, script: &Value| {
-        let text = serde_json::to_string_pretty(script).unwrap_or_default();
-        format!("{evidence}\nSession ({SESSION_FILE}):\n```json\n{text}\n```\n")
-    };
+    let inline = |evidence: &str, text: &str| format!("{evidence}\nSession ({SESSION_FILE}):\n```json\n{text}\n```\n");
     let fields = |evidence: String| {
         vec![("observed", observed.clone()), ("reproduction", reproduction.clone()), ("evidence", evidence), ("version", version.to_string())]
     };
     // The session in the link when it fits, else a file to attach (also on the clipboard).
     let mut url = String::new();
-    if let Some(script) = &script {
-        let candidate = fields(inline(&evidence, script));
+    if let Some((_, text)) = script {
+        let candidate = fields(inline(&evidence, &text));
         let u = link(&title, &candidate);
         if u.len() <= MAX_URL {
-            evidence = inline(&evidence, script);
+            evidence = inline(&evidence, &text);
             url = u;
         } else {
-            let text = serde_json::to_string_pretty(script).unwrap_or_default();
             evidence.push_str(&format!(
                 "\nThe session is too long for this form: FieldCraft saved it as `{SESSION_FILE}` and copied it to the clipboard. Attach the file here (drag it in) or paste it.\n"
             ));
@@ -373,6 +369,20 @@ mod tests {
         assert!(text.contains("too long for this form") && text.contains(MODEL_FILE) && !text.contains("\"label\": 399"), "{text}");
         // With the session shared, the crash's command parameters are shown (home as ~).
         assert!(text.contains("~/secret/plate.step"), "{text}");
+    }
+
+    #[test]
+    fn a_shared_session_names_no_home_folder() {
+        let open = |i: usize| json!({"command": "geometry.open", "params": {"path": format!("{}/parts/p{i}.step", home())}});
+        // Short: inline in the link.
+        let d = draft(&Input { share_session: true, commands: vec![open(0)], ..Default::default() }, "v1");
+        let text = decode(&d.url);
+        assert!(d.attachments.is_empty() && text.contains("~/parts/p0.step") && !text.contains(&home()), "{text}");
+        // Long: the attachment and the clipboard.
+        let d = draft(&Input { share_session: true, commands: (0..400).map(open).collect(), ..Default::default() }, "v1");
+        let session = String::from_utf8(d.attachments[0].bytes.clone()).unwrap();
+        assert!(session.contains("~/parts/p399.step") && !session.contains(&home()), "{session}");
+        assert_eq!(d.clipboard.as_deref(), Some(session.as_str()));
     }
 
     #[test]
