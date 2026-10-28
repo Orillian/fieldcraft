@@ -1364,11 +1364,22 @@ update are written from (cited again in the module docs):
   1985, DOI [10.1016/0045-7825(85)90070-2](https://doi.org/10.1016/0045-7825(85)90070-2).
 - The derivative of the matrix logarithm by divided differences (Daleckii–Krein), smooth through
   equal stretches: R. Bhatia, *Matrix Analysis*, Springer 1997, §V.3.
-- Kinematic hardening at finite strain (refused for now; the route when it comes): additive
-  plasticity in the Lagrangian logarithmic strain space, C. Miehe, N. Apel, M. Lambrecht, CMAME
+- Kinematic hardening at finite strain: additive
+  plasticity in the Lagrangian logarithmic strain space, C. Miehe, N. Apel, M. Lambrecht,
+  *Anisotropic additive plasticity in the logarithmic strain space: modular kinematic formulation
+  and implementation based on incremental minimization principles for standard materials*, CMAME
   191(47–48):5383–5425, 2002, DOI [10.1016/S0045-7825(02)00438-3](https://doi.org/10.1016/S0045-7825(02)00438-3).
+  E = ½ log(FᵀF), with its conjugate stress and consistent tangent mapped by the first
+  and second Fréchet derivatives of log; symmetric spectral divided differences retain
+  their repeated-root limits. The isotropic multiplicative path remains separate.
 - Prager's linear kinematic hardening: W. Prager, *The theory of plasticity: a survey of recent
   achievements*, Proc. Inst. Mech. Eng. 169:41–57, 1955.
+- Non-coaxial verification: M. Itskov, *On the applicability of generalized strain measures in
+  large strain plasticity*, in *Trends and Applications of Mathematics to Mechanics*, pp. 101–113,
+  2005, DOI [10.1007/88-470-0354-7_10](https://doi.org/10.1007/88-470-0354-7_10),
+  equation (60), Figure 1 (r = 0): the independent rigid-perfect-plastic simple-shear curve,
+  checked by `nl-j2-simple-shear`. This logarithmic response decreases at large shear; it is
+  not the constant shear response of multiplicative perfect plasticity.
 - Verification references: the thick cylinder's plastic zone and collapse pressure, R. Hill,
   *The Mathematical Theory of Plasticity*, Oxford 1950, ch. V; the cantilever's plastic hinge,
   B. G. Neal, *The Plastic Methods of Structural Analysis*, 3rd ed., Chapman & Hall 1977, and the

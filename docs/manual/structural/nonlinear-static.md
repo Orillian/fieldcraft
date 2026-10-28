@@ -12,7 +12,7 @@ materials from locking.
 | **Commands** | `solve.nonlinear` (solve), `model.step.create` / `model.step.edit` (define), `solve.history` (frames), `solve.probe` (values) |
 | **Step procedure** | `"nonlinear_static"` |
 | **Solver** | `crates/solver` (CPU, f64): `fieldcraft_solver::nonlinear`, `fieldcraft_solver::contact`; element and material kernels in `crates/fem` |
-| **Method** | Total Lagrangian finite strain, Newton–Raphson with the consistent tangent (Bathe 2014 §8.4; Crisfield 1991 ch. 9); J2 plasticity by Simo's exponential return map (Simo 1992); arc length after Riks (1979) and Crisfield (1981) |
+| **Method** | Total Lagrangian finite strain, Newton–Raphson with the consistent tangent (Bathe 2014 §8.4; Crisfield 1991 ch. 9); J2 plasticity by Simo's exponential return map (Simo 1992) or the Lagrangian logarithmic-strain return (Miehe, Apel & Lambrecht 2002); arc length after Riks (1979) and Crisfield (1981) |
 | **Verified by** | `crates/solver/tests/{nonlinear,plasticity,hybrid,nonlinear_thermal,arc_length}.rs`; oracle cases `nl-*`, `j2-bauschinger`, `j2-heated-bar`, `plastic-thick-cylinder`, `plastic-hinge-cantilever`, `arc-shallow-arch` |
 
 ## Synopsis
@@ -100,7 +100,7 @@ converges, so a cut-back increment leaves no trace.
 | Elastic (isotropic or orthotropic), no option | St Venant–Kirchhoff: S = D E, E = ½(FᵀF − I). Right for large rotations with small strains; it softens without bound in large compression. |
 | Isotropic elastic with `"hyperelastic": {"type": "neo_hookean"}` | Compressible neo-Hookean with the isochoric–volumetric split, W = μ/2 (Ī₁ − 3) + κ/2 (J − 1)², μ and κ from E and ν (C₁₀ = μ/2, D₁ = 2/κ). Its small-strain limit is the linear material, which linear steps use. |
 | Isotropic elastic with `{"type": "mooney_rivlin", "c01"}` or `{"type": "yeoh", "c20", "c30"}` | Decoupled polynomials W̄ = C₁₀ (Ī₁ − 3) + C₀₁ (Ī₂ − 3) + C₂₀ (Ī₁ − 3)² + C₃₀ (Ī₁ − 3)³ with the same volume term κ/2 (J − 1)²: Mooney–Rivlin with C₁₀ = μ/2 − C₀₁ (0 ≤ C₀₁ ≤ μ/2), Yeoh with C₁₀ = μ/2, so 2(C₁₀ + C₀₁) is the elastic μ and the small-strain material stays the elastic one. Stress and tangent from the fictitious τ̄ and c̄ (Holzapfel 2000, eqs. 6.168, 6.193). |
-| Isotropic elastic with `"plastic"` (bilinear isotropic or kinematic, table, Johnson–Cook) | J2 plasticity (`fieldcraft_fem::elastoplastic`). At finite strain, Simo's multiplicative model with a Hencky elastic energy, τ = K ln J I + 2G dev ½ ln bₑ, history Cₚ⁻¹ and the equivalent plastic strain, integrated by the exponential return map on the principal logarithmic strains. At small strain, the additive radial return with the back stress. Both call `J2::radial_return`, the update explicit dynamics uses, and its consistent tangent `J2::tangent`. |
+| Isotropic elastic with `"plastic"` (bilinear isotropic or kinematic, table, Johnson–Cook) | J2 plasticity (`fieldcraft_fem::elastoplastic`). At finite strain, isotropic hardening uses Simo's multiplicative model with a Hencky elastic energy, τ = K ln J I + 2G dev ½ ln bₑ, history Cₚ⁻¹ and the equivalent plastic strain, integrated by the exponential return map on the principal logarithmic strains. Linear kinematic hardening uses the Lagrangian logarithmic-strain model below. At small strain, both use the additive radial return with the back stress. All call `J2::radial_return`, the update explicit dynamics uses, and its consistent tangent `J2::tangent`. |
 
 "Isotropic elastic" means the same thing everywhere: the neo-Hookean model is chosen only by the
 explicit option.
@@ -119,6 +119,19 @@ tangent is symmetric (isotropic hardening) and is checked against central differ
 stress and of every element's forces from a plastic history. Hybrid elements take the deviatoric
 return and the volume term K/2 (ln J)². A hardening slope below −3G leaves the point without a
 tangent: the increment cuts back and the step stops at the minimum increment, naming the element.
+
+**Finite-strain kinematic hardening.** The full tensor radial return acts on the Lagrangian
+logarithmic strain E = ½ log C, C = FᵀF (Miehe, Apel and Lambrecht, CMAME 191, 2002).
+Its conjugate stress T and tangent D are mapped by the logarithm's first and second derivatives:
+S = L_log(C)[T] and C_mat[H] = L_log(C)[D[L_log(C)[H]]] + 2 D²log(C)[H,T],
+where H is a Green strain increment. Pushing S and C_mat forward gives the existing spatial
+interface. Divided differences include coincident eigenvalues, without differentiating eigenvectors.
+History slots 0–5 hold additive plastic logarithmic strain (engineering shears), 6–11 the
+reference-frame back stress, and 12 the accumulated plastic strain; isotropic hardening keeps
+its existing multiplicative history and update. The volume and hybrid split are unchanged.
+The uniaxial curve is expressed in logarithmic strain and Kirchhoff stress; reported Cauchy
+stress is τ/J. Simple-shear stress rises to a smooth peak and then decreases at large shear,
+as Hencky elasticity itself does; monotonicity to arbitrarily large shear is not implied.
 
 ### Elements
 
@@ -427,6 +440,8 @@ Oracle cases ([results](../../oracle.md)):
 | `nl-mooney-rivlin-tube` | theory: Rivlin's incompressible solution, λ_z = 1.5, ν = 0.4995 | bore; outer wall | 0.62 %; 0.028 abs. | 1 %; ± 0.04 |
 | `nl-mooney-rivlin-tube-axisymmetric` | as above, axisymmetric | bore; outer wall | 0.66 %; 0.029 abs. | 1 %; ± 0.04 |
 | `nl-j2-uniaxial` | theory: logarithmic strain 0.2 | axial Cauchy stress, plastic strain | < 10⁻⁶ | 10⁻⁶ rel. |
+| `nl-j2-simple-shear` | Itskov 2005, eq. (60), Fig. 1, r = 0 | shear stress at γ = 1, 2, 4, 8 | < 0.0001 % | 0.005 % |
+| `nl-j2-bauschinger` | theory: logarithmic strain 0.2, unloading to zero | residual stress, plastic strain | < 10⁻⁶ | 10⁻⁶ rel. |
 | `j2-bauschinger` | theory: load path back to zero strain | stress, plastic strain | < 10⁻⁶ | 10⁻⁶ rel. |
 | `plastic-thick-cylinder` | theory: Hill's thick cylinder | bore displacement at plastic radius 1.5a; collapse force | 0.0089 %; < 10⁻⁶ | 0.2 %; 0.1 % |
 | `plastic-hinge-cantilever` | theory: beam theory's plastic hinge | tip force at 4.5 times first-yield deflection | −3.2 % | 5 % |
@@ -477,8 +492,7 @@ waits for its reference value to be transcribed.
 - Hybrid tet4, wedge6 and tri3 are refused; nonlinear hybrid hex8, hex20 and tet10 need the
   neo-Hookean (or another hyperelastic) option. A continuous nodal pressure (Taylor–Hood) is not
   implemented.
-- Refused in nonlinear steps: kinematic hardening at finite strain (a back stress is not coaxial
-  with bₑ), the Johnson–Cook strain-rate term (C ≠ 0; a static step has no time), centrifugal
+- Refused in nonlinear steps: the Johnson–Cook strain-rate term (C ≠ 0; a static step has no time), centrifugal
   loads. Damage, erosion and adiabatic heating act in explicit dynamics only (a warning says so).
 - Couplings stay the linear constraints of the linear solver (small rotations of the reference
   point), with a warning; ties are small-displacement constraints; springs act along their fixed
@@ -509,6 +523,8 @@ waits for its reference value to be transcribed.
 
 ## References
 
+- M. Itskov. *On the applicability of generalized strain measures in large strain plasticity.* Trends and Applications of Mathematics to Mechanics, pp. 101–113, 2005. doi:[10.1007/88-470-0354-7_10](https://doi.org/10.1007/88-470-0354-7_10), eq. (60), Fig. 1.
+- C. Miehe, N. Apel, M. Lambrecht. *Anisotropic additive plasticity in the logarithmic strain space: modular kinematic formulation and implementation based on incremental minimization principles for standard materials.* CMAME 191:5383–5425, 2002. doi:10.1016/S0045-7825(02)00438-3.
 - K.-J. Bathe. *Finite Element Procedures*, 2nd ed., 2014 (§8.4).
 - K.-J. Bathe, A. P. Cimento. *Some practical procedures for the solution of nonlinear finite element equations.* CMAME 22:59–85, 1980.
 - M. A. Crisfield. *Non-linear Finite Element Analysis of Solids and Structures*, vol. 1, Wiley 1991 (ch. 9).

@@ -13,8 +13,8 @@ the implicit and explicit solvers.
 | **Commands** | `model.material.create`, `model.material.edit`, `model.material.plasticity`, `model.material.damage`, `model.material.delete` |
 | **Step procedure** | all structural and heat transfer procedures; see [Procedures](#procedures) |
 | **Solver** | `crates/fem` material kernels, used by `crates/solver` (CPU, f64) and `crates/explicit` |
-| **Method** | orthotropic compliance (Jones 1999); radial return (Simo & Hughes 1998, §3.3); multiplicative finite-strain plasticity (Simo 1992); Johnson–Cook flow and fracture (Johnson & Cook 1983, 1985); decoupled hyperelasticity (Holzapfel 2000, §6.6) |
-| **Verified by** | `nl-j2-uniaxial`, `j2-uniaxial-explicit`, `j2-bauschinger`, `j2-heated-bar`, `plastic-thick-cylinder`, `plastic-hinge-cantilever`, `nl-neo-hookean-uniaxial`, `nl-mooney-rivlin-*`, `nl-yeoh-uniaxial`, `nl-hybrid-incompressible`, `explicit-neo-hookean-implicit`; `crates/fem/src/{material,plasticity,elastoplastic,constitutive}.rs` tests |
+| **Method** | orthotropic compliance (Jones 1999); radial return (Simo & Hughes 1998, §3.3); multiplicative finite-strain plasticity (Simo 1992); Lagrangian logarithmic kinematic plasticity (Miehe, Apel & Lambrecht 2002); Johnson–Cook flow and fracture (Johnson & Cook 1983, 1985); decoupled hyperelasticity (Holzapfel 2000, §6.6) |
+| **Verified by** | `nl-j2-uniaxial`, `nl-j2-bauschinger`, `nl-j2-simple-shear`, `j2-uniaxial-explicit`, `j2-bauschinger`, `j2-heated-bar`, `plastic-thick-cylinder`, `plastic-hinge-cantilever`, `nl-neo-hookean-uniaxial`, `nl-mooney-rivlin-*`, `nl-yeoh-uniaxial`, `nl-hybrid-incompressible`, `explicit-neo-hookean-implicit`; `crates/fem/src/{material,plasticity,elastoplastic,constitutive}.rs` tests |
 
 ## Synopsis
 
@@ -141,10 +141,15 @@ subtracted first.
 `fieldcraft_fem::elastoplastic` wraps the same return with consistent tangents
 ([Nonlinear static](nonlinear-static.md) has the full treatment):
 
-- **Finite strain** (Simo 1992; Simo & Hughes 1998, ch. 9): F = Fₑ Fₚ, bₑ = F Cₚ⁻¹ Fᵀ, a Hencky
+- **Finite strain, isotropic hardening** (Simo 1992; Simo & Hughes 1998, ch. 9): F = Fₑ Fₚ, bₑ = F Cₚ⁻¹ Fᵀ, a Hencky
   energy τ = K ln J I + 2G dev εₑ with εₑ = ½ ln bₑ; the return of the infinitesimal theory on the
   principal logarithmic strains (the exponential map), which keeps det Cₚ = 1. History: Cₚ⁻¹ − I,
   the back stress and the equivalent plastic strain (13 values per integration point).
+- **Finite strain, linear kinematic hardening**: the full tensor return acts on the Lagrangian
+  logarithmic strain E = ½ log(FᵀF) (Miehe, Apel and Lambrecht 2002). The logarithm’s first and
+  second derivatives map the conjugate stress and consistent tangent to the spatial interface
+  ([Nonlinear static](nonlinear-static.md#material-point)). History: additive plastic logarithmic
+  strain (engineering shears), reference-frame back stress and equivalent plastic strain (13 values).
 - **Small strain**: ε = εₑ + εₚ, the trial εₑ = ε − εₚ,ₙ through the same return.
 - **Tangent**: 𝔻ᵉᵖ = K I⊗I + 2Gθ ℙ − 2Gθ̄ n⊗n (Simo & Hughes 1998, Box 3.2), with the
   Daleckii–Krein divided differences θ_AB = artanh(r)/r, r = (λ²_A − λ²_B)/(λ²_A + λ²_B), for the
@@ -197,7 +202,7 @@ elements are described in [Element library](elements.md#solid-continuum-elements
 | Density | mass, gravity, centrifugal | capacity (transient) | gravity | required |
 | Conductivity, specific heat | — | yes (coupled steps: steady) | steady conduction of the step's thermal conditions | — |
 | Expansion | temperature loads, coupled steps; solids, 2D, trusses | — | yes (multiplicative at finite strain) | isotropic only, as a strain rate |
-| Plasticity | elastic constants only, with a warning | — | J2 with consistent tangent; refused: kinematic hardening at finite strain, the Johnson–Cook rate term (C ≠ 0), incompatible-mode elements | J2 radial return; trusses refused |
+| Plasticity | elastic constants only, with a warning | — | J2 with consistent tangent; refused: the Johnson–Cook rate term (C ≠ 0), incompatible-mode elements | J2 radial return; trusses refused |
 | Johnson–Cook adiabatic heating | — | — | warning, not applied | yes |
 | Damage, erosion | warning, not applied | — | warning, not applied | yes |
 | Hyperelastic | the small-strain linear material | — | yes | yes, with nonlinear geometry and no thermal strain |
@@ -341,7 +346,7 @@ fibres next to the clamp), while the bar, yielded uniformly, unloads to zero str
 - Material axes are the global axes; there are no material orientations.
 - Plasticity is von Mises with isotropic, linear kinematic or Johnson–Cook hardening, on
   isotropic materials only; kinematic hardening is linear (Prager) and bilinear only.
-- The Johnson–Cook rate term and kinematic hardening at finite strain are refused in nonlinear
+- The Johnson–Cook rate term is refused in nonlinear
   static steps; damage, erosion and adiabatic heating act in explicit dynamics only.
 - No hyperelastic plasticity; no hyperelastic thermal strain in explicit dynamics.
 - Thermal properties are constant in temperature.
@@ -363,6 +368,7 @@ fibres next to the clamp), while the bar, yielded uniformly, unloads to zero str
 
 ## References
 
+- C. Miehe, N. Apel, M. Lambrecht. *Anisotropic additive plasticity in the logarithmic strain space: modular kinematic formulation and implementation based on incremental minimization principles for standard materials.* CMAME 191:5383–5425, 2002. doi:10.1016/S0045-7825(02)00438-3.
 - R. M. Jones. *Mechanics of Composite Materials*, 2nd ed. Taylor & Francis, 1999.
 - J. C. Simo, T. J. R. Hughes. *Computational Inelasticity.* Springer, 1998.
 - R. D. Krieg, D. B. Krieg. J. Press. Vessel Technol. 99(4):510–515, 1977. doi:[10.1115/1.3454568](https://doi.org/10.1115/1.3454568)

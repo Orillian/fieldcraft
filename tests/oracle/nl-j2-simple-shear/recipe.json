@@ -1,0 +1,15 @@
+[
+ {"command": "model.units", "params": {"system": "m-kg-s-N-Pa"}},
+ {"command": "mesh.block", "params": {"body": "Cube", "kind": "hex8", "corners": [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], "divisions": [1, 1, 1], "faces": {"3": "y0", "5": "y1", "1": "z0"}}},
+ {"command": "model.set.create", "params": {"name": "all", "geometry": [{"body": "Cube"}]}},
+ {"command": "model.set.create", "params": {"name": "y0", "geometry": [{"body": "Cube", "face": "y0"}]}},
+ {"command": "model.set.create", "params": {"name": "y1", "geometry": [{"body": "Cube", "face": "y1"}]}},
+ {"command": "model.set.create", "params": {"name": "z0", "geometry": [{"body": "Cube", "face": "z0"}]}},
+ {"command": "model.material.create", "params": {"name": "Perfect", "elastic": {"type": "isotropic", "young": 20000000.0, "poisson": 0.3}, "plastic": {"type": "bilinear", "yield_stress": 250, "hardening_modulus": 0, "hardening": "kinematic"}}},
+ {"command": "model.section.create", "params": {"name": "cube", "set": "all", "material": "Perfect", "kind": {"type": "solid"}}},
+ {"command": "model.boundary_condition.create", "params": {"name": "y0", "type": "displacement", "target": {"set": "y0"}, "values": [0, 0, null, null, null, null]}},
+ {"command": "model.boundary_condition.create", "params": {"name": "y1", "type": "displacement", "target": {"set": "y1"}, "values": [8, 0, null, null, null, null]}},
+ {"command": "model.boundary_condition.create", "params": {"name": "sz", "type": "symmetry", "target": {"set": "z0"}, "plane": "z"}},
+ {"command": "model.step.create", "params": {"name": "Shear", "procedure": {"type": "nonlinear_static", "nonlinear_geometry": true, "initial_increment": 0.000244140625, "max_increment": 0.000244140625, "max_increments": 5000}, "boundary_conditions": ["y0", "y1", "sz"], "loads": []}},
+ {"command": "solve.nonlinear", "params": {"step": "Shear"}, "id": "solve"}
+]

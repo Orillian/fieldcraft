@@ -1,0 +1,45 @@
+{
+ "title": "Finite-strain Bauschinger cycle in Lagrangian logarithmic strain",
+ "kind": "theory",
+ "source": "Miehe, Apel and Lambrecht, CMAME 191:5383–5425 (2002), doi:10.1016/S0045-7825(02)00438-3, logarithmic-strain plasticity with Prager hardening (W. Prager, The theory of plasticity: a survey of recent achievements, Proc. Inst. Mech. Eng. 169:41–57, 1955). Uniaxial relations: E_t = E H/(E+H), tau_a = sigma_y + E_t (e_a - sigma_y/E), tau_r = tau_a - 2 sigma_y - E_t (e_a - 2 sigma_y/E), J_r = exp(tau_r/(3K)), sigma_r = tau_r/J_r, ep = (E e_a - sigma_y)/(E+H) + (E e_a - 2 sigma_y)/(E+H)",
+ "quantities": [
+  {
+   "id": "residual_stress",
+   "quantity": "Cauchy axial stress after returning from axial logarithmic strain 0.2 to zero displacement",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Pull",
+     "elements": [
+      1
+     ]
+    },
+    "pointer": "/elements/0/stress/0/0"
+   },
+   "value": -247.64731981737123,
+   "tolerance": {
+    "relative": 1e-06
+   },
+   "reason": "Homogeneous uniaxial stress with free lateral contraction; the Kirchhoff residual must be converted to Cauchy stress with the residual elastic volume"
+  },
+  {
+   "id": "plastic_strain",
+   "quantity": "Accumulated equivalent plastic strain",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Pull",
+     "elements": [
+      1
+     ]
+    },
+    "pointer": "/elements/0/plastic_strain/0"
+   },
+   "value": 0.39232673267326734,
+   "tolerance": {
+    "relative": 1e-06
+   },
+   "reason": "Forward and reverse plastic increments of the Prager return in logarithmic strain space"
+  }
+ ]
+}

@@ -1,0 +1,87 @@
+{
+  "title": "Non-coaxial simple shear against Itskov’s published logarithmic-plasticity curve",
+  "kind": "theory",
+  "source": "M. Itskov, On the applicability of generalized strain measures in large strain plasticity, Trends and Applications of Mathematics to Mechanics, pp. 101–113 (2005), doi:10.1007/88-470-0354-7_10, eqs. (45), (60)–(61), Fig. 1, r = 0. Rigid-perfect-plastic additive logarithmic model: tau_xy/(Y/sqrt(3)) = 2 sqrt(4 + gamma^2 + 4 asinh(gamma/2)^2)/(4 + gamma^2).",
+  "quantities": [
+    {
+      "id": "shear_1",
+      "quantity": "Kirchhoff shear stress at gamma = 1, on the published r = 0 curve",
+      "measure": {
+        "command": "solve.history",
+        "params": {
+          "step": "Shear",
+          "sets": [
+            "y1"
+          ],
+          "every": 512
+        },
+        "pointer": "/sets/0/reaction/1/0"
+      },
+      "value": 140.54962685007715,
+      "tolerance": {
+        "relative": 5e-05
+      },
+      "reason": "The unit top face reaction equals tau_xy (J = 1). The 0.005% band covers return integration with delta gamma = 1/512 and finite elasticity Y/E = 1.25e-5; material-point tests check step and rigidity refinement toward the rigid-plastic limit."
+    },
+    {
+      "id": "shear_2",
+      "quantity": "Kirchhoff shear stress at gamma = 2, on the published r = 0 curve",
+      "measure": {
+        "command": "solve.history",
+        "params": {
+          "step": "Shear",
+          "sets": [
+            "y1"
+          ],
+          "every": 512
+        },
+        "pointer": "/sets/0/reaction/2/0"
+      },
+      "value": 120.26055480132885,
+      "tolerance": {
+        "relative": 5e-05
+      },
+      "reason": "The unit top face reaction equals tau_xy (J = 1). The 0.005% band covers return integration with delta gamma = 1/512 and finite elasticity Y/E = 1.25e-5; material-point tests check step and rigidity refinement toward the rigid-plastic limit."
+    },
+    {
+      "id": "shear_4",
+      "quantity": "Kirchhoff shear stress at gamma = 4, on the published r = 0 curve",
+      "measure": {
+        "command": "solve.history",
+        "params": {
+          "step": "Shear",
+          "sets": [
+            "y1"
+          ],
+          "every": 512
+        },
+        "pointer": "/sets/0/reaction/4/0"
+      },
+      "value": 76.83360476377264,
+      "tolerance": {
+        "relative": 5e-05
+      },
+      "reason": "The unit top face reaction equals tau_xy (J = 1). The 0.005% band covers return integration with delta gamma = 1/512 and finite elasticity Y/E = 1.25e-5; material-point tests check step and rigidity refinement toward the rigid-plastic limit."
+    },
+    {
+      "id": "shear_8",
+      "quantity": "Kirchhoff shear stress at gamma = 8, on the published r = 0 curve",
+      "measure": {
+        "command": "solve.history",
+        "params": {
+          "step": "Shear",
+          "sets": [
+            "y1"
+          ],
+          "every": 512
+        },
+        "pointer": "/sets/0/reaction/8/0"
+      },
+      "value": 39.265734597353486,
+      "tolerance": {
+        "relative": 5e-05
+      },
+      "reason": "The unit top face reaction equals tau_xy (J = 1). The 0.005% band covers return integration with delta gamma = 1/512 and finite elasticity Y/E = 1.25e-5; material-point tests check step and rigidity refinement toward the rigid-plastic limit."
+    }
+  ]
+}
