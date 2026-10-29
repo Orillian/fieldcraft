@@ -152,7 +152,7 @@ of its forces.
 | hybrid quad4, quad8, tri6 (plane strain, axisymmetric) | mean dilatation: θ = ∫ J dV₀ / V₀ with the hoop stretch, p = U′(θ), stiffness U″ g gᵀ / V₀ |
 | hybrid hex8, hex20, tet10 | Simo–Taylor–Pister three-field form on the linear hybrid elements' pressure fields (θ the projection of J, p the projection of U′(θ)); needs the neo-Hookean option (St Venant–Kirchhoff has no volumetric split) |
 | plane strain, axisymmetric (tri3, tri6, quad4, quad8) | total Lagrangian with F₃₃ = 1 or r/R (hoop column N/r, geometric term τ_θθ N_a N_b/r²) |
-| hex8 and quad4 incompatible modes | refused (see Limitations) |
+| hex8 and quad4 incompatible modes (plane strain, axisymmetric) | enhanced assumed strain (Simo & Armero 1992): F = I + Σ u_a ⊗ ∇₀N_a + Σ α_k ⊗ G̃_k with the linear element's mapped mode gradients; the modes α solved element by element at every evaluation (bounded local Newton iteration from the last converged α) and condensed into the consistent tangent; an hourglass check stops the step in large compression (see Limitations) |
 | plane stress | refused |
 | trusses, shells, beams | refused |
 
@@ -435,7 +435,9 @@ Oracle cases ([results](../../oracle.md)):
 | `nl-hybrid-incompressible` | theory: λ = 2, ν = 0.4999 | axial stress, lateral displacement | < 10⁻⁶ | 10⁻⁶ rel. |
 | `nl-patch-hex8` | theory: nonlinear patch test on a distorted mesh | displacements, Cauchy stresses at an inner node | < 10⁻⁶ | 10⁻⁸ / 10⁻⁷ rel. |
 | `nl-rigid-rotation` | theory: rigid rotation | displacements; von Mises 0 | < 10⁻⁷ | ± 10⁻⁹ |
+| `nl-patch-hex8-incompatible` | theory: as `nl-patch-hex8`, incompatible-mode hex8 | displacements, Cauchy stresses at an inner node | < 10⁻⁶ | 10⁻⁸ / 10⁻⁷ rel. |
 | `nl-elastica-cantilever` | theory: elastica (Bisshopp–Drucker), P L²/(E I) = 1, 2, 5, 10, hex20 | tip deflection; tip shortening | 0.18–0.44 %; 0.35–0.54 % | 1 %; 2 % |
+| `nl-elastica-cantilever-hex8-incompatible` | as above, one incompatible-mode hex8 through the depth (40 × 1 × 1) | tip deflection; tip shortening | 0.14–0.41 %; 0.30–0.51 % | 1 %; 2 % |
 | `nl-cylinder-inflation` | theory: Rivlin's thick neo-Hookean tube, follower pressure | bore; outer wall | 0.079 %; 0.15 % | 0.5 % |
 | `nl-mooney-rivlin-tube` | theory: Rivlin's incompressible solution, λ_z = 1.5, ν = 0.4995 | bore; outer wall | 0.62 %; 0.028 abs. | 1 %; ± 0.04 |
 | `nl-mooney-rivlin-tube-axisymmetric` | as above, axisymmetric | bore; outer wall | 0.66 %; 0.029 abs. | 1 %; ± 0.04 |
@@ -455,10 +457,13 @@ Tests:
   consistent tangents of every material and element against central differences; uniaxial
   stretch to λ = 2 of a neo-Hookean block in every element kind, plane strain and axisymmetric;
   St Venant–Kirchhoff uniaxial stretch; the nonlinear patch test on a distorted mesh (hybrid
-  elements included); a 90° rigid rotation; Newton's quadratic convergence; the linear limit;
+  elements and incompatible modes included); a 90° rigid rotation; Newton's quadratic convergence;
+  the linear limit (an incompatible-mode hex8 cantilever included);
   hybrids near ν = ½ under prescribed displacement; the failures (an element inverted by crushing
   stops at the minimum increment, naming it; the caps; what is refused); determinism; coupled
-  reference points that converge the same in any units and at any size.
+  reference points that converge the same in any units and at any size; a nearly incompressible
+  incompatible-mode block homogeneous at a compressive stretch of 0.7 and stopped, naming the
+  element, at 0.5.
 - `crates/solver/tests/plasticity.rs`, `crates/fem/src/elastoplastic.rs`: consistent tangents
   from a plastic history (material point and every element, finite and small strain, full and
   hybrid); uniaxial tension to a logarithmic strain of 0.2 in every element kind (Kirchhoff
@@ -485,10 +490,24 @@ waits for its reference value to be transcribed.
 - Trusses, shells and beams are refused (large rotations of structural elements are not
   implemented).
 - Plane stress is refused (σ_zz = 0 needs a local iteration for the thickness).
-- Incompatible-mode hex8 and quad4 are refused with nonlinear geometry or an inelastic material:
-  their finite-strain form (enhanced assumed strain, Simo–Armero 1992) needs the modes as
-  unknowns carried between iterations and hourglasses in large compression. Use full integration,
-  hybrid or quadratic elements.
+- Incompatible-mode hex8 and quad4 hourglass in large compression (Wriggers & Reese 1996), and no
+  published stabilisation (Glaser & Armero 1997; Reese, Wriggers & Reddy 2000) is implemented.
+  Instead, with nonlinear geometry and an elastic material, every tangent evaluation checks that
+  the condensed element stiffness stays positive definite on the element's hourglass modes (the
+  parent patterns less their linear part in the current configuration, as in Flanagan &
+  Belytschko 1981, so no constant-strain stiffness enters), so a step never returns a state that
+  may have hourglassed. A failed check is an element error and cuts the increment back; the loss
+  of stiffness belongs to the state, so smaller increments only approach it again, and the step
+  stops at the minimum increment after its cutbacks, with an error naming the element. The check
+  is an element-level criterion: it fires where the coarse element itself loses stiffness, not
+  where the material does (a neo-Hookean material stays strongly elliptic in compression, so the
+  homogeneous state is stable), and it also fires on displacement-based elements at large
+  compression. A free neo-Hookean cube in uniaxial compression trips it at a stretch of about
+  0.58, the same stretch at which a fully integrated hex8 loses its own hourglass stiffness; a
+  square quad4 at about 0.53 in plane strain and 0.52 axisymmetric (shear modulus 1, bulk
+  modulus 10), where the fully integrated quad4 keeps its stiffness. With plasticity the check
+  is left to the global tangent's negative pivots. For large compression use hybrid or quadratic
+  elements.
 - Hybrid tet4, wedge6 and tri3 are refused; nonlinear hybrid hex8, hex20 and tet10 need the
   neo-Hookean (or another hyperelastic) option. A continuous nodal pressure (Taylor–Hood) is not
   implemented.
@@ -533,6 +552,9 @@ waits for its reference value to be transcribed.
 - J. C. Simo. CMAME 99:61–112, 1992 (the exponential return map of finite-strain plasticity).
 - J. C. Simo, T. J. R. Hughes. *Computational Inelasticity*, Springer 1998 (Box 3.2).
 - J. C. Simo, F. Armero. *Geometrically non-linear enhanced strain mixed methods and the method of incompatible modes.* IJNME 33:1413–1449, 1992.
+- P. Wriggers, S. Reese. *A note on enhanced strain methods for large deformations.* CMAME 135:201–209, 1996.
+- S. Glaser, F. Armero. *On the formulation of enhanced strain finite elements in finite deformations.* Engineering Computations 14(7):759–791, 1997.
+- S. Reese, P. Wriggers, B. D. Reddy. *A new locking-free brick element technique for large deformation problems in elasticity.* Computers & Structures 75(3):291–304, 2000.
 - G. A. Holzapfel. *Nonlinear Solid Mechanics*, Wiley 2000 (eqs. 6.168, 6.193).
 - T. J. R. Hughes. *The Finite Element Method*, Dover 2000 (§4.3–4.5).
 - J. C. Nagtegaal, D. M. Parks, J. R. Rice. *On numerically accurate finite element solutions in the fully plastic range.* CMAME 4(2):153–177, 1974.

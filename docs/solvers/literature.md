@@ -1404,9 +1404,14 @@ update are written from (cited again in the module docs):
 - Decoupled neo-Hookean energy: P. J. Flory, Trans. Faraday Soc. 57:829–838, 1961.
 - Mixed u–p at finite strain: J. C. Simo, R. L. Taylor, K. S. Pister, CMAME 51:177–208, 1985;
   mean dilatation: J. C. Nagtegaal, D. M. Parks, J. R. Rice, CMAME 4:153–177, 1974.
-- Enhanced assumed strain at finite strain (why incompatible modes are refused for now): J. C.
-  Simo, F. Armero, IJNME 33:1413–1449, 1992; their hourglassing in compression: P. Wriggers,
-  S. Reese, CMAME 135:201–209, 1996.
+- Incompatible modes at finite strain as enhanced assumed strain (the enhanced deformation
+  gradient, the modes condensed per element, the consistent tangent): J. C. Simo, F. Armero,
+  IJNME 33:1413–1449, 1992, with the det J₀/det J mapping of R. L. Taylor, P. J. Beresford,
+  E. L. Wilson, IJNME 10(6):1211–1219, 1976. Their hourglassing in compression: P. Wriggers,
+  S. Reese, CMAME 135:201–209, 1996; the published stabilisations, not implemented (an hourglass
+  check on the element's hourglass modes, the parent patterns less their linear part by
+  Flanagan & Belytschko's integrated gradients, stops the step instead): S. Glaser, F. Armero, Eng. Comput. 14(7):759–791, 1997; S. Reese,
+  P. Wriggers, B. D. Reddy, Comput. Struct. 75(3):291–304, 2000.
 - Follower pressure and its load stiffness: K. Schweizerhof, E. Ramm, Comput. Struct.
   18(6):1099–1114, 1984.
 - Newton–Raphson, line search and convergence criteria: M. A. Crisfield, *Non-linear Finite

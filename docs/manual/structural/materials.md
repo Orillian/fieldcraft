@@ -246,7 +246,7 @@ temperature at or below 0 K.
 | Density | mass, gravity, centrifugal | capacity (transient) | gravity | required |
 | Conductivity, specific heat | — | yes (coupled steps: steady) | steady conduction of the step's thermal conditions | — |
 | Expansion | temperature loads, coupled steps; solids, 2D, trusses | — | yes (multiplicative at finite strain) | isotropic only, as a strain rate |
-| Plasticity | elastic constants only, with a warning | — | J2 with consistent tangent; refused: the Johnson–Cook rate term (C ≠ 0), incompatible-mode elements | J2 radial return; trusses refused |
+| Plasticity | elastic constants only, with a warning | — | J2 with consistent tangent; refused: the Johnson–Cook rate term (C ≠ 0) | J2 radial return; trusses refused |
 | Johnson–Cook adiabatic heating | — | — | warning, not applied | yes |
 | Damage, erosion | warning, not applied | — | warning, not applied | yes |
 | Hyperelastic | the small-strain linear material | — | yes | yes, with nonlinear geometry and no thermal strain |

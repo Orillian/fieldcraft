@@ -369,7 +369,7 @@ beams warns that only solid, 2D and truss elements are strained ([Heat transfer]
 
 | Element | Linear static, frequency | Buckling | Heat transfer | Nonlinear static | Explicit dynamics |
 |---|---|---|---|---|---|
-| tet4, tet10, wedge6, pyramid5, hex8 (full, incompatible), hex20 (full, reduced) | yes | yes | yes (conduction on the element's full rule; the formulation does not apply) | yes (hex8 incompatible refused with nonlinear geometry or an inelastic material) | tet4 (nodal-pressure) and one-point hex8 only |
+| tet4, tet10, wedge6, pyramid5, hex8 (full, incompatible), hex20 (full, reduced) | yes | yes | yes (conduction on the element's full rule; the formulation does not apply) | yes (hex8 incompatible: enhanced assumed strain, stopped by an hourglass check in large compression) | tet4 (nodal-pressure) and one-point hex8 only |
 | hybrid hex8, hex20, tet10 | yes | yes | yes (as the displacement element) | yes (needs the neo-Hookean option or another hyperelastic or plastic model with a volumetric split) | refused |
 | plane stress tri3, tri6, quad4, quad8 | yes | yes | refused | refused | refused |
 | plane strain, axisymmetric tri3, tri6, quad4, quad8 (and hybrid quad4, quad8, tri6) | yes | yes | refused | yes | refused |
