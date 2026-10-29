@@ -1,0 +1,25 @@
+{
+  "note": "FieldCraft's accepted results for this case, written by `cargo xtask oracle --bless`. A result outside its band fails CI.",
+  "values": {
+    "held_bottom": {
+      "band": 1.9200000000000003e-7,
+      "value": 191.9999999999844
+    },
+    "held_top": {
+      "band": 2.880000000000127e-7,
+      "value": 288.0000000000127
+    },
+    "max_von_mises": {
+      "band": 0.0001,
+      "value": 3.3924375265060915e-7
+    },
+    "tip_deflection": {
+      "band": 9.60000001126381e-10,
+      "value": 0.960000001126381
+    },
+    "tip_shortening": {
+      "band": 1.92e-10,
+      "value": -0.19199999996344003
+    }
+  }
+}

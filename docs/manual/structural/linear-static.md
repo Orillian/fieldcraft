@@ -262,7 +262,7 @@ probe at the foot's end lies within 0.13 % of the fine tet10 solution.
 | Filleted bracket, peak fillet stress (mesh-converged reference) | theory (convergence study) | within 3 % (fine), 5 % (coarse); reaction exact | 3 %, 5 % | `filleted-bracket-fillet-stress`, `-coarse` |
 | A buckling preload equals the static solution, 1 and 3 threads | determinism | bit for bit | exact | `buckling_preloads_match_static_with_loads_motion_and_temperature` |
 | Field transfer of uniform and linear fields, tet4, tet10, wedge6, pyramid5, hex8, hex20 | theory | < 10⁻¹² | exact | `crates/fem/src/transfer.rs` tests |
-| Initial stress held by the supports; linear residual stress and linear initial temperature released in a free beam (w″ = 2 s / (E H), w″ = α g) | theory (Timoshenko & Goodier §150) | < 10⁻⁸ | 10⁻⁸ | `crates/solver/tests/initial.rs` |
+| Initial stress held by the supports; linear residual stress and linear initial temperature released in a free beam (w″ = 2 s / (E H), w″ = α g) | theory (Timoshenko & Goodier §150) | < 10⁻⁸ | 10⁻⁸ | `crates/solver/tests/initial.rs`, `initial-temperature-beam`, `initial-stress-beam` |
 | Linear temperature and uniform stress mapped from hex20 onto tet10 of other divisions, then held | theory | 10⁻⁹ K, 10⁻⁷ rel.; solved stress 10⁻⁶ rel. | as stated | `cmd::initial::tests` |
 | Errors and caps | singular model names a node; `max_dofs`, `max_factor_entries` refuse with the byte estimate | — | — | `errors_name_the_problem` |
 

@@ -1,0 +1,76 @@
+{
+ "title": "A residual stress linear through a beam's depth, released",
+ "kind": "theory",
+ "source": "Timoshenko and Goodier, Theory of Elasticity, 3rd ed., McGraw-Hill 1970, §150 (a thermal strain linear in the coordinates is compatible and leaves a free body stress-free): the beam held at its ends (u_x = 0) while its thermal strain α (T − T₀(z)) is linear in z carries σ_xx = −E α (T − T₀(z)) and nothing else; mapped as the initial stress σ₀ of a free beam, it is released entirely into the strain −C⁻¹σ₀, linear in z, so the beam is left stress-free with the curvature 2 s/(E H) of a stress s (2z/H − 1) about its mean",
+ "quantities": [
+  {
+   "id": "held_bottom",
+   "quantity": "σ_xx of the held beam at (100, 10, 0), −E α (20 − 100)",
+   "measure": {
+    "from": "held",
+    "pointer": "/nodes/0/stress/0"
+   },
+   "value": 192.0,
+   "tolerance": {
+    "relative": 1e-08
+   },
+   "reason": "a stress linear in z, which hex20 represents exactly"
+  },
+  {
+   "id": "held_top",
+   "quantity": "σ_xx of the held beam at (100, 10, 10), −E α (20 − 140)",
+   "measure": {
+    "from": "held",
+    "pointer": "/nodes/1/stress/0"
+   },
+   "value": 288.0,
+   "tolerance": {
+    "relative": 1e-08
+   },
+   "reason": "as for held_bottom"
+  },
+  {
+   "id": "tip_deflection",
+   "quantity": "deflection u_z of the released beam's free end (200, 0, 0), −(dσ₀/dz) L²/(2E)",
+   "measure": {
+    "from": "tip",
+    "pointer": "/nodes/0/displacement/2"
+   },
+   "value": 0.96,
+   "tolerance": {
+    "relative": 1e-08
+   },
+   "reason": "a linear initial stress, which the hex20 nodal stresses map exactly, released into a quadratic displacement field, which hex20 represents exactly"
+  },
+  {
+   "id": "tip_shortening",
+   "quantity": "axial displacement u_x of the released beam's free end (200, 0, 0), −σ₀(0) L/E",
+   "measure": {
+    "from": "tip",
+    "pointer": "/nodes/0/displacement/0"
+   },
+   "value": -0.192,
+   "tolerance": {
+    "relative": 1e-08
+   },
+   "reason": "as for tip_deflection"
+  },
+  {
+   "id": "max_von_mises",
+   "quantity": "largest nodal von Mises stress of the released beam (zero)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Release",
+     "set": "all"
+    },
+    "pointer": "/max_von_mises/value"
+   },
+   "value": 0.0,
+   "tolerance": {
+    "absolute": 0.0001
+   },
+   "reason": "10⁻⁶ of the released stress range (96): rounding only"
+  }
+ ]
+}

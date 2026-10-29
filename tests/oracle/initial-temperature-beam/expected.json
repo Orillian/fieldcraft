@@ -1,0 +1,50 @@
+{
+ "title": "A beam ejected with a temperature linear through its depth, cooled to a uniform temperature",
+ "kind": "theory",
+ "source": "Timoshenko and Goodier, Theory of Elasticity, 3rd ed., McGraw-Hill 1970, §150 (a thermal strain linear in the coordinates is compatible and leaves a free body stress-free): the thermal strain α (T − T₀(z)) is linear in z, so the free beam bends stress-free to the curvature α dT₀/dz and its mid-line shrinks by α (T − T₀)",
+ "quantities": [
+  {
+   "id": "tip_deflection",
+   "quantity": "deflection u_z of the free end (200, 0, 0), α g L²/2",
+   "measure": {
+    "from": "tip",
+    "pointer": "/nodes/0/displacement/2"
+   },
+   "value": 0.96,
+   "tolerance": {
+    "relative": 1e-08
+   },
+   "reason": "a quadratic displacement field, which hex20 represents exactly; the mapped temperature is linear, which the heat step and the mapping reproduce exactly"
+  },
+  {
+   "id": "tip_shortening",
+   "quantity": "axial displacement u_x of the free end (200, 0, 0), α (T − T₀(0)) L",
+   "measure": {
+    "from": "tip",
+    "pointer": "/nodes/0/displacement/0"
+   },
+   "value": -0.192,
+   "tolerance": {
+    "relative": 1e-08
+   },
+   "reason": "as for tip_deflection"
+  },
+  {
+   "id": "max_von_mises",
+   "quantity": "largest nodal von Mises stress (zero: the eigenstrain is compatible)",
+   "measure": {
+    "command": "solve.probe",
+    "params": {
+     "step": "Cool",
+     "set": "all"
+    },
+    "pointer": "/max_von_mises/value"
+   },
+   "value": 0.0,
+   "tolerance": {
+    "absolute": 0.0001
+   },
+   "reason": "10⁻⁶ of E α ΔT over the depth (96): rounding only"
+  }
+ ]
+}

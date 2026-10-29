@@ -1,0 +1,23 @@
+[
+ {"command": "mesh.block", "params": {"body": "Beam", "kind": "hex20", "corners": [[0, 0, 0], [200, 0, 0], [200, 20, 0], [0, 20, 0], [0, 0, 10], [200, 0, 10], [200, 20, 10], [0, 20, 10]], "divisions": [8, 2, 2], "faces": {"1": "bottom", "2": "top"}, "vertices": {"1": "a", "4": "b", "5": "c"}}},
+ {"command": "model.set.create", "params": {"name": "all", "geometry": [{"body": "Beam"}]}},
+ {"command": "model.set.create", "params": {"name": "bottom", "geometry": [{"body": "Beam", "face": "bottom"}]}},
+ {"command": "model.set.create", "params": {"name": "top", "geometry": [{"body": "Beam", "face": "top"}]}},
+ {"command": "model.set.create", "params": {"name": "a", "geometry": [{"body": "Beam", "vertex": "a"}]}},
+ {"command": "model.set.create", "params": {"name": "b", "geometry": [{"body": "Beam", "vertex": "b"}]}},
+ {"command": "model.set.create", "params": {"name": "c", "geometry": [{"body": "Beam", "vertex": "c"}]}},
+ {"command": "model.material.create", "params": {"name": "Steel", "elastic": {"type": "isotropic", "young": 200000.0, "poisson": 0.3}, "thermal": {"conductivity": 45.0, "expansion": 1.2e-05, "reference_temperature": 0.0}}},
+ {"command": "model.section.create", "params": {"name": "beam", "set": "all", "material": "Steel", "kind": {"type": "solid"}}},
+ {"command": "model.boundary_condition.create", "params": {"name": "cool_side", "type": "temperature", "target": {"set": "bottom"}, "value": 100.0}},
+ {"command": "model.boundary_condition.create", "params": {"name": "hot_side", "type": "temperature", "target": {"set": "top"}, "value": 140.0}},
+ {"command": "model.step.create", "params": {"name": "Mould", "procedure": {"type": "heat_transfer"}, "boundary_conditions": ["cool_side", "hot_side"], "loads": []}},
+ {"command": "solve.heat", "params": {"step": "Mould"}},
+ {"command": "model.initial_field.map", "params": {"name": "Ejected", "quantity": "temperature", "step": "Mould"}},
+ {"command": "model.boundary_condition.create", "params": {"name": "a", "type": "displacement", "target": {"set": "a"}, "values": [0.0, 0.0, 0.0, null, null, null]}},
+ {"command": "model.boundary_condition.create", "params": {"name": "b", "type": "displacement", "target": {"set": "b"}, "values": [0.0, null, 0.0, null, null, null]}},
+ {"command": "model.boundary_condition.create", "params": {"name": "c", "type": "displacement", "target": {"set": "c"}, "values": [0.0, null, null, null, null, null]}},
+ {"command": "model.load.create", "params": {"name": "room", "type": "temperature", "target": {"set": "all"}, "value": 20.0}},
+ {"command": "model.step.create", "params": {"name": "Cool", "procedure": {"type": "static"}, "boundary_conditions": ["a", "b", "c"], "loads": ["room"]}},
+ {"command": "solve.static", "params": {"step": "Cool"}},
+ {"command": "solve.probe", "params": {"step": "Cool", "at": [[200, 0, 0]]}, "id": "tip"}
+]
