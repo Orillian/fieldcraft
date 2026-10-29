@@ -1549,3 +1549,30 @@ written from (cited again in the module docs); docs/manual/structural/contact.md
 - Verification: Hertz's contact of cylinders and spheres, H. Hertz, J. reine angew. Math.
   92:156–171, 1882; K. L. Johnson, *Contact Mechanics*, Cambridge 1985, §4.2–4.3 (eqs. 4.45–4.49
   for the line contact's pressure and subsurface stresses).
+
+## Part S: Initial fields mapped from another analysis (#160), as implemented
+
+The sources `fieldcraft_fem::transfer`, `Solid::initial_stress_load` and `fieldcraft_model::initial`
+are written from (cited again in the module docs); docs/manual/structural/linear-static.md
+("Initial fields") describes the formulation. DOI and ISBNs checked on 2026-10-29 (doi.org handle
+API, Crossref, Open Library).
+
+- **Field transfer.** Consistent (pointwise) interpolation: each target node takes the source
+  element's shape-function interpolation at the point it lies at, which reproduces every field
+  the source's shape functions reproduce. A. de Boer, A. H. van Zuijlen, H. Bijl, *Review of
+  coupling methods for non-matching meshes*, Comput. Methods Appl. Mech. Engrg.
+  196(8):1515–1525, 2007, §2.1, DOI [10.1016/j.cma.2006.03.017](https://doi.org/10.1016/j.cma.2006.03.017).
+  The point is located by Newton's method on the isoparametric map x(ξ) (O. C. Zienkiewicz,
+  R. L. Taylor, J. Z. Zhu, *The Finite Element Method: Its Basis and Fundamentals*, 7th ed.,
+  Butterworth-Heinemann 2013, ISBN 978-1-85617-633-0, §6.5).
+- **Initial stress and initial temperature.** The initial-stress load −∫ Bᵀ σ₀ dV with
+  σ = D (ε − ε_th) + σ₀, and the thermal strain α (T − T₀) measured from the initial temperature,
+  as initial-strain and initial-stress terms of the displacement formulation: Zienkiewicz, Taylor
+  & Zhu 2013, §6.2.3 (as for the thermal strain of Part K).
+- **Verification** (`crates/solver/tests/initial.rs`, oracle cases `initial-temperature-beam` and
+  `initial-stress-beam`, analytic): a strain linear in the coordinates is compatible, so a free
+  body releases it without stress (S. P. Timoshenko, J. N. Goodier, *Theory of Elasticity*,
+  3rd ed., McGraw-Hill 1970, ISBN 0-07-064720-8, §150): a beam ejected with a temperature linear
+  through its depth bends stress-free to the curvature α dT₀/dz, a linear residual stress
+  s (2z/H − 1) is released into the curvature 2 s/(E H), and a self-equilibrated residual stress
+  held by the supports moves nothing.
