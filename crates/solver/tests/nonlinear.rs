@@ -96,6 +96,42 @@ fn neo_hookean_block_in_uniaxial_stretch() {
     }
 }
 
+/// Incompatible-mode hex8 in large compression of a nearly incompressible neo-Hookean block,
+/// free laterally (where enhanced strain elements develop spurious hourglass modes, Wriggers &
+/// Reese 1996): at a stretch of 0.7 the homogeneous closed form at every node; at 0.5 the step
+/// stops with an error naming an element that lost its hourglass stiffness, never a converged
+/// state.
+#[test]
+fn incompatible_modes_in_large_compression_are_homogeneous_or_stop() {
+    let (e, nu) = (10.0, 0.4995);
+    let (mu, kappa) = (e / (2.0 * (1.0 + nu)), e / (3.0 * (1.0 - 2.0 * nu)));
+    for lam in [0.7, 0.5] {
+        let mut g = grid([2, 2, 2], ElementKind::Hex8, |x| x);
+        g.define(iso(e, nu), None, incompatible(), nonlinear());
+        neo_hookean(&mut g, e, nu);
+        g.symmetry("x0", Symmetry::X, |x| near(x[0], 0.0));
+        g.symmetry("y0", Symmetry::Y, |x| near(x[1], 0.0));
+        g.symmetry("z0", Symmetry::Z, |x| near(x[2], 0.0));
+        g.node_set("x1", |x| near(x[0], 1.0));
+        g.bc("push", BoundaryCondition::Displacement { target: Target::Set("x1".into()), values: [Some(lam - 1.0), None, None, None, None, None] });
+        let r = solve_nonlinear(&g.model, Some("Step"), &Limits::default());
+        if lam < 0.6 {
+            let err = r.unwrap_err().to_string();
+            assert!(err.contains("element") && err.contains("hourglass"), "{err}");
+            continue;
+        }
+        let r = r.unwrap();
+        let (l, _) = neo_hookean_uniaxial(mu, kappa, lam);
+        for (i, label) in r.nodes.iter().enumerate() {
+            let x = g.model.node(*label).unwrap().xyz;
+            let want = [(lam - 1.0) * x[0], (l - 1.0) * x[1], (l - 1.0) * x[2]];
+            for k in 0..3 {
+                assert!((r.displacement[i][k] - want[k]).abs() < 1e-8, "node {label}: {:?} vs {want:?}", r.displacement[i]);
+            }
+        }
+    }
+}
+
 /// St Venant–Kirchhoff in uniaxial stress: S₁₁ = E E₁₁ with E₁₁ = (λ² − 1)/2, lateral
 /// E₂₂ = −ν E₁₁; the Cauchy stress σ = λ² S₁₁ / J.
 #[test]
@@ -311,29 +347,35 @@ fn newton_converges_quadratically() {
     assert!(best > 1.8, "no quadratic convergence (best order {best})");
 }
 
-/// Without nonlinear geometry, and with a small load with it, the step is the linear solution.
+/// Without nonlinear geometry, and with a small load with it, the step is the linear solution:
+/// a hex20 cantilever, and the incompatible-mode hex8 cantilever of the oracle case
+/// cantilever-hex8-incompatible (whose enhanced modes must reduce to the linear element's).
 #[test]
 fn small_loads_and_small_kinematics_give_the_linear_solution() {
-    let build = |procedure: Procedure, scale: f64| {
-        let mut g = grid([6, 1, 2], ElementKind::Hex20, |q| [6.0 * q[0], q[1], q[2]]);
-        g.define(iso(1000.0, 0.3), None, full(), procedure);
-        g.fixed("root", |q| near(q[0], 0.0));
-        g.face_set("tip", |q| near(q[0], 1.0));
-        g.load("push", Load::Force { target: Target::Set("tip".into()), vector: [0.0, 0.0, -scale], distribution: Distribution::Total });
-        g.face_set("top", |q| near(q[2], 1.0));
-        g.load("press", Load::Pressure { set: "top".into(), magnitude: 0.1 * scale });
-        g
-    };
-    let linear = solve_static(&build(Procedure::Static {}, 1e-3).model, None, &Limits::default()).unwrap();
-    let small = NonlinearStatic { nonlinear_geometry: false, ..NonlinearStatic::default() };
-    let r = solve(&build(Procedure::NonlinearStatic(small), 1e-3));
-    let tip = linear.displacement.iter().fold(0.0f64, |m, u| m.max(u[2].abs()));
-    for (a, b) in r.displacement.iter().zip(&linear.displacement) {
-        assert!((0..3).all(|k| (a[k] - b[k]).abs() < 1e-9 * tip), "{a:?} vs {b:?}");
-    }
-    let r = solve(&build(nonlinear(), 1e-3));
-    for (a, b) in r.displacement.iter().zip(&linear.displacement) {
-        assert!((0..3).all(|k| (a[k] - b[k]).abs() < 1e-3 * tip), "geometric effects of order u/L: {a:?} vs {b:?}");
+    let cases =
+        [(ElementKind::Hex20, full(), [6, 1, 2], 6.0, 0.3, "hex20"), (ElementKind::Hex8, incompatible(), [20, 2, 2], 10.0, 0.0, "hex8 incompatible")];
+    for (kind, formulation, n, length, nu, name) in cases {
+        let build = |procedure: Procedure, scale: f64| {
+            let mut g = grid(n, kind, |q| [length * q[0], q[1], q[2]]);
+            g.define(iso(1000.0, nu), None, formulation, procedure);
+            g.fixed("root", |q| near(q[0], 0.0));
+            g.face_set("tip", |q| near(q[0], 1.0));
+            g.load("push", Load::Force { target: Target::Set("tip".into()), vector: [0.0, 0.0, -scale], distribution: Distribution::Total });
+            g.face_set("top", |q| near(q[2], 1.0));
+            g.load("press", Load::Pressure { set: "top".into(), magnitude: 0.1 * scale });
+            g
+        };
+        let linear = solve_static(&build(Procedure::Static {}, 1e-3).model, None, &Limits::default()).unwrap();
+        let small = NonlinearStatic { nonlinear_geometry: false, ..NonlinearStatic::default() };
+        let r = solve(&build(Procedure::NonlinearStatic(small), 1e-3));
+        let tip = linear.displacement.iter().fold(0.0f64, |m, u| m.max(u[2].abs()));
+        for (a, b) in r.displacement.iter().zip(&linear.displacement) {
+            assert!((0..3).all(|k| (a[k] - b[k]).abs() < 1e-9 * tip), "{name}: {a:?} vs {b:?}");
+        }
+        let r = solve(&build(nonlinear(), 1e-3));
+        for (a, b) in r.displacement.iter().zip(&linear.displacement) {
+            assert!((0..3).all(|k| (a[k] - b[k]).abs() < 1e-3 * tip), "{name}: geometric effects of order u/L: {a:?} vs {b:?}");
+        }
     }
 }
 
