@@ -141,3 +141,17 @@ fn orthotropic_expansion_and_heat_loads_are_refused() {
     .unwrap();
     assert!(solve_explicit(&m, None, &Limits::default()).unwrap_err().to_string().contains("orthotropic thermal expansion"));
 }
+
+#[test]
+fn explicit_steps_start_without_initial_fields_and_say_so() {
+    // An initial temperature at the load's temperature would leave no thermal strain if it
+    // acted; explicit steps leave it out, so the bar still expands by α ΔT L, with a warning.
+    let mut m = bar(ElementKind::Hex8, false, None);
+    let values = m.nodes().keys().map(|l| (*l, fieldcraft_model::units::celsius_to_kelvin(DT))).collect();
+    m.set_initial_field("Ejected", InitialField::Temperature { values, source: String::new() }).unwrap();
+    let r = solve_explicit(&m, None, &Limits::default()).unwrap();
+    assert!(r.warnings.iter().any(|w| w.contains("step `Heat` starts without them")), "{:?}", r.warnings);
+    let tip = r.nodes.iter().position(|l| *l == 5).unwrap();
+    let want = ALPHA * DT * LENGTH;
+    assert!((r.frames.last().unwrap().displacement[tip][0] - want).abs() < 0.02 * want);
+}

@@ -340,7 +340,7 @@ impl System {
             hourglass_coefficient: settings.hourglass.coefficient,
             nonlinear: settings.nonlinear_geometry,
             stress_rate: settings.stress_rate,
-            warnings: resolved.warnings.iter().map(ToString::to_string).collect(),
+            warnings: resolved.warnings.iter().map(ToString::to_string).chain(fieldcraft_model::initial::left_out(model, step)).collect(),
             labels,
             xyz,
         };
